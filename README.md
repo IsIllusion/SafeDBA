@@ -100,6 +100,215 @@ flowchart TD
 
 ---
 
+
+## Demo Scenarios
+
+SafeDBA is designed to distinguish between situations that require
+optimization, situations that require maintenance, and situations where
+the safest decision is to take no action.
+
+The following scenarios illustrate that behavior.
+
+### Demo 1 — Correctly Refusing an Unnecessary Optimization
+
+**Incident**
+
+```sql
+SELECT *
+FROM orders
+WHERE id > 0;
+```
+
+PostgreSQL chooses a Sequential Scan even though the table already has
+a primary-key B-tree index on `id`.
+
+A naive SQL-optimization agent might treat the Sequential Scan itself as
+a problem and recommend another index.
+
+SafeDBA instead collects execution evidence:
+
+```text
+Scan type:            Sequential Scan
+Rows examined:        1,000,000
+Rows returned:        1,000,000
+Rows removed:         0
+Selectivity:          1.0
+Cardinality error:    1.0
+```
+
+Because the query returns effectively the entire table, the Sequential
+Scan is appropriate.
+
+SafeDBA therefore produces:
+
+```text
+Diagnosis:
+The predicate is non-selective and the Sequential Scan is appropriate.
+
+Action:
+NO_ACTION
+```
+
+No index, rewrite, or statistics-maintenance proposal is submitted.
+
+This scenario is included in the regression benchmark and passed all
+three runs without a false-positive optimization.
+
+---
+
+### Demo 2 — Stale Statistics Instead of a Missing Index
+
+**Incident**
+
+```sql
+SELECT *
+FROM cardinality_test
+WHERE status = 'hot';
+```
+
+Runtime evidence shows:
+
+```text
+Rows examined:               100,000
+Rows returned:                50,000
+Planner estimated rows:            1
+Cardinality error ratio:      50,000x
+Predicate selectivity:             0.5
+```
+
+The query uses a Sequential Scan, but the scan itself is not the main
+problem: returning 50% of the table makes a Sequential Scan reasonable.
+
+SafeDBA inspects PostgreSQL statistics and finds that the planner
+statistics describe a distribution that no longer matches the observed
+data.
+
+The resulting diagnosis is:
+
+```text
+Root cause:
+Severely stale planner statistics.
+
+Rejected alternatives:
+CREATE_INDEX
+REWRITE_QUERY
+
+Structured proposal:
+ANALYZE_TABLE
+```
+
+The expected outcome is improved cardinality estimation, not
+necessarily a different scan type or lower latency.
+
+This distinction matters because SafeDBA evaluates the operation against
+an action-specific acceptance criterion instead of assuming that every
+database intervention must make the query faster.
+
+This scenario also passed all three runs in the current regression
+benchmark.
+
+---
+
+### Demo 3 — Lock Contention RCA with Controlled Remediation
+
+SafeDBA can also investigate operational incidents without starting from
+a predefined SQL optimization case.
+
+For a PostgreSQL blocking scenario, the Agent can collect deterministic
+runtime evidence such as:
+
+```text
+blocked backend
+        |
+        | pg_blocking_pids()
+        v
+blocking backend
+
++ session state
++ wait event
++ transaction age
++ blocked SQL
++ blocker SQL
++ waiting-lock evidence
+```
+
+A typical diagnosis may identify an idle-in-transaction client backend
+that is currently blocking another backend waiting on a lock.
+
+SafeDBA does not give the LLM direct permission to terminate that
+session.
+
+Instead, remediation follows this path:
+
+```text
+Agent investigation
+        |
+        v
+Current lock evidence
+        |
+        v
+Structured TERMINATE_BACKEND proposal
+        |
+        v
+Deterministic validation
+        |
+        v
+HIGH-risk classification
+        |
+        v
+Human approval
+        |
+        v
+Execution-time revalidation
+        |
+        v
+pg_terminate_backend(...)
+        |
+        v
+Post-action lock verification
+        |
+        v
+Append-only audit record
+```
+
+The executor rechecks that the blocking relationship still exists before
+attempting termination. This reduces the risk of acting on stale Agent
+evidence.
+
+After execution, SafeDBA verifies whether the original blocking
+relationship has disappeared rather than treating a successful API call
+as proof that the incident was resolved.
+
+Backend termination remains a deliberately narrow, human-approved,
+HIGH-risk operation.
+
+> This lock-contention flow is currently exercised through manual
+> integration / end-to-end verification scripts and is not part of the
+> four-scenario automated regression benchmark above.
+
+---
+
+### What These Scenarios Demonstrate
+
+The goal is not simply to make an LLM produce DBA recommendations.
+
+The scenarios exercise three different decisions:
+
+| Scenario | Correct System Behavior |
+|---|---|
+| Broad predicate / correct Seq Scan | Refuse unnecessary optimization |
+| Severe stale-statistics error | Propose targeted statistics maintenance |
+| Runtime lock contention | Perform RCA and gate remediation behind safety controls |
+
+Together they demonstrate the separation between:
+
+```text
+probabilistic investigation
+        and
+deterministic execution authority
+```
+
+
 ## Core Capabilities
 
 ### 1. SQL Performance Diagnosis
