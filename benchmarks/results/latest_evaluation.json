@@ -1,0 +1,914 @@
+{
+  "benchmark": {
+    "cases": 4,
+    "runs_per_case": 3,
+    "total_runs": 12
+  },
+  "metrics": {
+    "passed_runs": 12,
+    "failed_runs": 0,
+    "overall_run_pass_rate": 100.0,
+    "no_action_runs": 3,
+    "false_positive_optimizations": 0,
+    "false_positive_optimization_rate": 0.0,
+    "decision_passed_runs": 12,
+    "decision_pass_rate": 100.0,
+    "evidence_fidelity_passed_runs": 12,
+    "evidence_fidelity_pass_rate": 100.0
+  },
+  "runs": [
+    {
+      "case": {
+        "case_id": "case_001_missing_index",
+        "title": "Missing index on selective predicate",
+        "query": "SELECT * FROM orders WHERE customer_id = 4242;",
+        "expected": {
+          "proposal_type": "CREATE_INDEX",
+          "forbidden_proposal_types": [
+            "REWRITE_QUERY"
+          ],
+          "table": "orders",
+          "column": "customer_id"
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_indexes"
+        ],
+        "setup_sql": [
+          "DROP INDEX IF EXISTS idx_orders_customer_id;"
+        ],
+        "description": "A highly selective customer_id predicate has no supporting index. SafeDBA should diagnose the missing index and propose CREATE_INDEX."
+      },
+      "result": {
+        "case_id": "case_001_missing_index",
+        "title": "Missing index on selective predicate",
+        "agent_answer": "## Observations\n\nThe query `SELECT * FROM orders WHERE customer_id = 4242;` currently performs a **Parallel Sequential Scan** over the entire `orders` table.\n\n## Evidence\n\n- **Scan type:** Parallel Sequential Scan on `orders`, filter `(customer_id = 4242)`, across 3 parallel loops\n- **Rows examined:** ~999,999 (approximate; PostgreSQL may average per-loop counts across parallel workers)\n- **Rows returned:** 9\n- **Rows removed by filter:** 999,990\n- **Selectivity:** ≈ 9e-06 — a **highly selective predicate**; only about 0.0009% of examined rows matched\n- **Execution time:** ~62.5 ms\n- **Cardinality error ratio:** ~1.22 (near 1; planner estimates well aligned with actuals)\n- **Non-sargable findings:** none (predicate is direct equality, not wrapped in a function)\n- **Existing indexes on `orders`:** `orders_pkey` on `id`, `idx_orders_created_at` on `created_at`\n\n## Diagnosis\n\nThis is a **missing-index** problem. The predicate `customer_id = 4242` is highly selective, yet the executor scans roughly one million rows to return only 9 rows. Neither existing index (`id`, `created_at`) can support a `customer_id` filter, and `get_indexes` confirms no index exists on `customer_id`.\n\nA Sequential Scan here is not appropriate: the predicate only matches about 0.0009% of rows, so the scan of ~1M rows with 999,990 rows removed by filter is disproportionate. Cardinality estimation is accurate, and there is no non-sargable obstruction, so the missing index is the clear root cause.\n\n## Recommendation\n\nPropose creating an index on `orders(customer_id)`. This may enable an **Index Scan or Bitmap Heap Scan** on `customer_id` instead of the full-table Parallel Sequential Scan.\n\nNote on access path: because the query is `SELECT *`, a single-column index on `customer_id` covers the filter predicate but **not** the projected columns. Therefore the outcome would be an Index Scan or Bitmap Heap Scan — an **Index Only Scan should not be expected** from this non-covering index. The actual post-action scan type must be verified by the executor.\n\n## Risk / uncertainty\n\n- The proposed index is **not yet created**; this is only a structured proposal evaluated by the separate safety/execution layer.\n- No performance improvement is claimed before an executor benchmark confirms changed access path and reduced rows examined.\n- Index creation carries MEDIUM operational risk (potential write-path overhead and storage cost), which must be weighed by the execution layer.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "CREATE_INDEX"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_indexes"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_indexes",
+              "propose_create_index"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "CREATE_INDEX"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "propose_create_index"
+        ],
+        "run_number": 1
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_001_missing_index",
+        "title": "Missing index on selective predicate",
+        "query": "SELECT * FROM orders WHERE customer_id = 4242;",
+        "expected": {
+          "proposal_type": "CREATE_INDEX",
+          "forbidden_proposal_types": [
+            "REWRITE_QUERY"
+          ],
+          "table": "orders",
+          "column": "customer_id"
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_indexes"
+        ],
+        "setup_sql": [
+          "DROP INDEX IF EXISTS idx_orders_customer_id;"
+        ],
+        "description": "A highly selective customer_id predicate has no supporting index. SafeDBA should diagnose the missing index and propose CREATE_INDEX."
+      },
+      "result": {
+        "case_id": "case_001_missing_index",
+        "title": "Missing index on selective predicate",
+        "agent_answer": "## Observations\n\n- The query filters `orders` on `customer_id = 4242`, a highly selective predicate.\n- Existing indexes on the table are `idx_orders_created_at` (created_at) and `orders_pkey` (id); neither supports `customer_id`.\n\n## Evidence\n\n**analyze_query:**\n- **Access path:** `Parallel Sequential Scan` on `orders`.\n- **Rows examined:** ~999,999 (loop-adjusted, approximate per EXPLAIN rounding).\n- **Rows removed by filter:** 999,990.\n- **Rows returned:** 9.\n- **Selectivity:** ~0.000009, which is about **0.0009%** of examined rows matched — a **highly selective predicate**.\n- **Cardinality error ratio:** ~1.22 (planner estimate reasonably aligned with actual).\n- **Non-sargable findings:** none.\n- **Cardinality findings:** none (no severe estimation error).\n- **Execution time:** ~21.32 ms, dominated by scanning the full table and discarding ~1M rows.\n\n**get_indexes:** Confirms no index exists on `customer_id`.\n\n## Diagnosis\n\nThe predicate `customer_id = 4242` is highly selective yet the access path scans the entire table (~1M rows) to return just 9 rows. No existing index can support this filter. This is a strong **missing index** diagnosis: the correct supporting index for this column does not exist, forcing a Parallel Sequential Scan that must examine nearly the whole table and discard ~999,990 rows via the filter.\n\nNote: this is a `SELECT *` query, so a single-column index on `customer_id` would not be covering; an Index Only Scan is not expected.\n\n## Recommendation\n\nPropose the creation of a B-tree index on `orders(customer_id)` to support the filter. This may enable an index-backed access path (Index Scan or Bitmap Heap Scan), reducing rows examined from ~1M to the small set of matching rows.\n\n**Proposal submitted:** `propose_create_index` — `idx_orders_customer_id` on `orders(customer_id)`, confidence 0.9.\n\nThis is a proposal only; no index has been created. Actual creation and any post-action scan-type/performance validation are handled by the separate safety/execution layer.\n\n## Risk / uncertainty\n\n- Actual benefit is not measured until the executor benchmarks the query under the proposed index. The access path could switch to an Index Scan or Bitmap Heap Scan, but the exact post-action scan type must be verified by the executor.\n- This is a `SELECT *` query; the index does not enable an Index Only Scan, so the executor will still need to fetch the table rows (heap access) for each match.\n- Index creation is a DDL operation with write/maintenance overhead and requires safety-layer approval; it is not a risk-free operation.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "CREATE_INDEX"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_indexes"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_indexes",
+              "propose_create_index"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "CREATE_INDEX"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "propose_create_index"
+        ],
+        "run_number": 2
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_001_missing_index",
+        "title": "Missing index on selective predicate",
+        "query": "SELECT * FROM orders WHERE customer_id = 4242;",
+        "expected": {
+          "proposal_type": "CREATE_INDEX",
+          "forbidden_proposal_types": [
+            "REWRITE_QUERY"
+          ],
+          "table": "orders",
+          "column": "customer_id"
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_indexes"
+        ],
+        "setup_sql": [
+          "DROP INDEX IF EXISTS idx_orders_customer_id;"
+        ],
+        "description": "A highly selective customer_id predicate has no supporting index. SafeDBA should diagnose the missing index and propose CREATE_INDEX."
+      },
+      "result": {
+        "case_id": "case_001_missing_index",
+        "title": "Missing index on selective predicate",
+        "agent_answer": "## Observations\n- Query: `SELECT * FROM orders WHERE customer_id = 4242;`\n- Access path: **Parallel Sequential Scan** on `orders`\n- Execution time: ~14.2 ms\n\n## Evidence\n- **Rows examined**: ~999,999 (approximate, per-loop EXPLAIN stats averaged across 3 parallel workers)\n- **Rows returned**: 9\n- **Rows removed by filter**: 999,990\n- **Selectivity**: 9 / 999,999 ≈ 0.000009 — approximately **0.0009%** of examined rows matched. The predicate `customer_id = 4242` is **highly selective**.\n- **Cardinality estimation**: `cardinality_error_ratio` ≈ 1.22 — planner estimate (11 rows) closely aligns with actual (9 rows). No cardinality findings.\n- **Non-sargable findings**: none.\n- **Existing indexes** (`get_indexes`): `orders_pkey` on `id`, and `idx_orders_created_at` on `created_at`. **No index on `customer_id`.**\n- **Column type** (`get_column_info`): `customer_id` is `bigint` (int8), non-nullable.\n\n## Diagnosis\nThe primary root cause is a **missing supporting index on `customer_id`** combined with a highly selective equality predicate.\n\nThe query filters on `customer_id = 4242`, which matches only ~9 of ~1 million rows. Because there is no index on `customer_id`, PostgreSQL is forced to scan the entire table (Sequential Scan), examining ~999,999 rows and discarding 999,990 at the filter stage. This is an overwhelmingly selective predicate — an index-backed access path would be far more appropriate than a full scan.\n\nA Sequential Scan here is *not* appropriate because only a tiny fraction of the table satisfies the predicate. `get_indexes` confirms no existing index supports this filter, so a missing index is a strong and well-supported diagnosis.\n\n## Recommendation\nSubmit a structured proposal to **create an index on `orders(customer_id)`** (`propose_create_index`, confidence 0.95).\n\nExpected effect: the proposed index may enable an Index Scan or Bitmap Heap Scan on `customer_id`, reducing rows examined from ~1M to the ~9 matching rows. \n\nNote on access path scope: because the query is `SELECT *`, a single-column index on `customer_id` would not cover all projected columns, so it would not enable an Index Only Scan. The actual post-action scan type must be verified by the executor.\n\n## Risk / uncertainty\n- Creating the index has storage and write-amplification costs on the `orders` table (which appears to contain ~1M rows). This is a `MEDIUM`-risk action and should be evaluated by the safety/execution layer before any actual `CREATE INDEX` is run.\n- The concrete performance improvement has not been benchmarked; it requires controlled executor benchmarking to confirm.\n- If this table is very frequently written (high-volume insert/update workload), the index maintenance overhead should be weighed against the read-path benefit.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "CREATE_INDEX"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_indexes"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes",
+              "propose_create_index"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "CREATE_INDEX"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info",
+          "propose_create_index"
+        ],
+        "run_number": 3
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_002_non_sargable",
+        "title": "Non-sargable DATE predicate",
+        "query": "SELECT * FROM orders WHERE DATE(created_at) = DATE '2026-05-18';",
+        "expected": {
+          "proposal_type": "REWRITE_QUERY",
+          "forbidden_proposal_types": [
+            "CREATE_INDEX"
+          ]
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info"
+        ],
+        "setup_sql": [
+          "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);"
+        ],
+        "description": "An appropriate created_at index already exists, but DATE(created_at) makes the predicate non-sargable. SafeDBA should propose REWRITE_QUERY rather than another index."
+      },
+      "result": {
+        "case_id": "case_002_non_sargable",
+        "title": "Non-sargable DATE predicate",
+        "agent_answer": "### Observations\n\nThe query `SELECT * FROM orders WHERE DATE(created_at) = DATE '2026-05-18';` performs a **Parallel Sequential Scan** over the `orders` table, examining approximately 1,000,002 rows and removing ~997,290 rows by filter to return ~2,712 rows.\n\n### Evidence\n\n**Table scan (analyze_query):**\n- Scan type: `Parallel Sequential Scan` over ~1.0M rows (approximate, per-loop reported)\n- Rows returned: ~2,712; rows removed by filter: ~997,290\n- **Selectivity ≈ 0.0027** — about **0.27%** of examined rows matched the predicate, i.e., a **highly selective predicate**\n- Execution time: ~19.4 ms\n\n**Non-sargable finding (analyze_query):**\n- The tool deterministically reports `NON_SARGABLE_FUNCTION_ON_INDEXED_COLUMN`: predicate `date(created_at) = '2026-05-18'::date` wraps the column in `DATE(...)`.\n\n**Schema/type (get_column_info):**\n- `orders.created_at` is `timestamp without time zone`.\n\n**Indexes (get_indexes):**\n- `idx_orders_created_at` exists on `orders(created_at)` (btree).\n- `orders_pkey` exists on `orders(id)`.\n\n### Diagnosis\n\nThe **root cause is a non-sargable predicate**. The `created_at` column already has an ordinary btree index (`idx_orders_created_at`), but because the predicate wraps the column in the `DATE()` function, PostgreSQL cannot use that index directly. This forces a full sequential scan of the table even though the predicate is highly selective (~0.27% of rows match).\n\nThis is **not a missing-index problem** — an appropriate index already exists. Creating another ordinary index on `created_at` would be redundant and would not help, because the `DATE()` function wrapper blocks index use regardless. The correct direction is a candidate query rewrite that makes the predicate sargable and lets the existing index be used.\n\n### Recommendation\n\nSubmit a **candidate query rewrite** that replaces the non-sargable function wrapper with a sargable range predicate:\n\n```sql\nSELECT * FROM orders\nWHERE created_at >= DATE '2026-05-18'\n  AND created_at < DATE '2026-05-18' + INTERVAL '1 day';\n```\n\nBecause `created_at` is confirmed `timestamp without time zone`, the half-open range `>= DATE '...' AND < DATE '...' + INTERVAL '1 day'` is a strong candidate that is expected to preserve the intended single-day semantics and is expected to enable an index-backed access path using `idx_orders_created_at` (likely an Index Scan or Bitmap Heap Scan). This proposal has been submitted.\n\n### Risk / uncertainty\n\n- **Semantic equivalence is a hypothesis, not yet established.** Schema/type evidence (`timestamp without time zone`) strongly supports the semantic-preservation hypothesis, but result-set equivalence still requires deterministic executor validation before the rewrite can be trusted.\n- **Performance gain is not yet measured.** The rewrite is expected to allow the existing index to be used and significantly reduce rows examined, but the actual post-action scan type and speedup must be verified by the executor through benchmarking.\n- The query is `SELECT *`, so the existing single-column `idx_orders_created_at` does **not** cover all projected columns; therefore an Index Only Scan is not claimed — an Index Scan or Bitmap Heap Scan is the expected access path.\n- No ANALYZE proposal is warranted: there is no severe cardinality estimation error, and statistics are not implicated in this diagnosis.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "REWRITE_QUERY"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes",
+              "propose_query_rewrite"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "REWRITE_QUERY"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_column_info",
+          "get_indexes",
+          "propose_query_rewrite"
+        ],
+        "run_number": 1
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_002_non_sargable",
+        "title": "Non-sargable DATE predicate",
+        "query": "SELECT * FROM orders WHERE DATE(created_at) = DATE '2026-05-18';",
+        "expected": {
+          "proposal_type": "REWRITE_QUERY",
+          "forbidden_proposal_types": [
+            "CREATE_INDEX"
+          ]
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info"
+        ],
+        "setup_sql": [
+          "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);"
+        ],
+        "description": "An appropriate created_at index already exists, but DATE(created_at) makes the predicate non-sargable. SafeDBA should propose REWRITE_QUERY rather than another index."
+      },
+      "result": {
+        "case_id": "case_002_non_sargable",
+        "title": "Non-sargable DATE predicate",
+        "agent_answer": "## Observations\n\n- The query scans the entire `orders` table via a **Parallel Sequential Scan** (3 loops), examining ~1,000,002 rows.\n- Only 2,712 rows are returned; 997,290 rows are removed by the filter.\n- The predicate is `DATE(created_at) = DATE '2026-05-18'`, wrapping the `created_at` column in a `DATE()` function.\n- An existing btree index `idx_orders_created_at` is not used by this query.\n\n## Evidence\n\n- **`analyze_query`**: \n  - Scan type: `Parallel Sequential Scan`, no index used, examined ~1,000,002 rows (approximate, loop-averaged), removed ~997,290 rows by filter.\n  - Selectivity ≈ 2,712 / 1,000,002 ≈ **0.0027** — about **0.27%** of examined rows matched; the predicate is **highly selective**.\n  - **Non-sargable finding**: `NON_SARGABLE_FUNCTION_ON_INDEXED_COLUMN` — column `orders.created_at` has an index, but the filter wraps it in `DATE(...)`, preventing direct index use.\n  - No severe cardinality error findings (error ratio ≈ 1.84, moderate but not flagged as severe; not the root cause).\n- **`get_indexes`**: `idx_orders_created_at` exists on `orders.created_at` (btree).\n- **`get_column_info`**: `created_at` is `timestamp without time zone`, NOT NULL.\n\n## Diagnosis\n\nThe root cause is a **non-sargable predicate**. The existing btree index on `created_at` cannot be used because the filter applies the `DATE()` function expression to the indexed column. This is **not a missing-index problem** — an appropriate index already exists but the predicate shape prevents its utilization. The result is a full-table parallel sequential scan (~1M rows) for a highly selective filter (~0.27%).\n\nBecause `created_at` is confirmed to be `timestamp without time zone`, this matches the explicit candidate range-rewrite pattern in the guidelines, providing a strong schema/type basis for a semantic-preservation hypothesis.\n\n## Recommendation\n\nSubmit the candidate range rewrite:\n\n```sql\nSELECT * FROM orders\nWHERE created_at >= DATE '2026-05-18'\n  AND created_at < DATE '2026-05-18' + INTERVAL '1 day';\n```\n\nThis restores a sargable predicate on the raw column and is expected to enable an index-backed access path (Index Scan or Bitmap Heap Scan) on the existing `idx_orders_created_at`, avoiding the Parallel Sequential Scan of ~1M rows.\n\nI have submitted this as a **query rewrite proposal** (confidence 0.85). No new index is proposed, because the root cause is the non-sargable predicate, not a missing index.\n\n## Risk / uncertainty\n\n- **Semantic equivalence is not established**: The rewrite is a candidate expected to preserve the intended date-range semantics, based on the verified `timestamp without time zone` type. Deterministic executor result-set validation (compare_query_results) is still required to confirm result-set equivalence before this is treated as equivalent.\n- **Performance improvement not yet measured**: Rewriting should reduce rows examined, but the actual scan type and timing gains must be verified by executor benchmarking.\n- The `DATE(created_at) = DATE '2026-05-18'` form matches the exact provided rewrite pattern; the `>=` / `<` + `INTERVAL '1 day'` bounds correctly cover the full 2026-05-18 calendar day (midnight to before the next midnight). No NULL handling concern arises since the column is NOT NULL.\n- **No ANALYZE proposed**: Although planner cardinality is somewhat off (ratio ≈ 1.84), it was not flagged as a severe error and the primary issue is clearly structural, not statistics-related.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "REWRITE_QUERY"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes",
+              "propose_query_rewrite"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "REWRITE_QUERY"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info",
+          "propose_query_rewrite"
+        ],
+        "run_number": 2
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_002_non_sargable",
+        "title": "Non-sargable DATE predicate",
+        "query": "SELECT * FROM orders WHERE DATE(created_at) = DATE '2026-05-18';",
+        "expected": {
+          "proposal_type": "REWRITE_QUERY",
+          "forbidden_proposal_types": [
+            "CREATE_INDEX"
+          ]
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info"
+        ],
+        "setup_sql": [
+          "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);"
+        ],
+        "description": "An appropriate created_at index already exists, but DATE(created_at) makes the predicate non-sargable. SafeDBA should propose REWRITE_QUERY rather than another index."
+      },
+      "result": {
+        "case_id": "case_002_non_sargable",
+        "title": "Non-sargable DATE predicate",
+        "agent_answer": "Let me present the full diagnosis.\n\n## Observations\n\nThe query filters orders to a single calendar day by wrapping the `created_at` column in a `DATE(...)` function. This predicate is highly selective.\n\n## Evidence\n\n- **Execution plan**: `Parallel Sequential Scan` on `orders`, with ~1,000,002 rows examined across 3 loops, ~997,290 rows removed by the filter, and ~2,712 rows returned.\n- **Selectivity**: ≈ 0.0027, meaning approximately **0.27%** of examined rows matched. This is a **highly selective predicate**.\n- **Non-sargable finding**: `NON_SARGABLE_FUNCTION_ON_INDEXED_COLUMN` — column `orders.created_at` has an index, but the predicate wraps it in `DATE(...)`, preventing the ordinary index from being used.\n- **Existing indexes**: `idx_orders_created_at` (btree on `created_at`) and `orders_pkey` (btree on `id`).\n- **Column type**: `created_at` is `timestamp without time zone` (confirmed via `get_column_info`).\n- **Cardinality**: `cardinality_error_ratio` ≈ 1.84, with no `cardinality_findings` entries flagged as severe. Not a stale-statistics concern.\n\n## Diagnosis\n\nThe root cause is a **non-sargable predicate**. An appropriate index — `idx_orders_created_at` — already exists on `created_at`, so this is **not** a missing-index situation. The `DATE(created_at)` wrapper requires PostgreSQL to evaluate the function on every row, defeating the btree index, which is why a full table scan is used even though the predicate matches only ~0.27% of rows.\n\nThe correct fix is a **query rewrite** to a half-open range that is directly index-sargable, not a new index. Given that `created_at` is `timestamp without time zone`, the candidate range `created_at >= DATE '2026-05-18' AND created_at < DATE '2026-05-18' + INTERVAL '1 day'` is expected to preserve the intended date-range semantics.\n\n## Recommendation\n\nI submitted a **query rewrite proposal** converting the `DATE(created_at) = DATE '2026-05-18'` predicate into:\n\n```sql\ncreated_at >= DATE '2026-05-18'\nAND created_at < DATE '2026-05-18' + INTERVAL '1 day'\n```\n\nThis is expected to allow the existing `idx_orders_created_at` index to back the access path, potentially converting the Parallel Sequential Scan into an Index Scan or Bitmap Heap Scan, dramatically reducing rows examined. No new index should be created — one is already present.\n\n## Risk / uncertainty\n\n- **Semantic equivalence is not yet established.** Schema/type evidence (column is `timestamp without time zone`) supports the semantic-preservation hypothesis, but deterministic executor result-set validation is required before the rewritten query can be declared equivalent to the original. I have not claimed equivalence as fact.\n- **Performance improvement is not yet measured.** The rewrite may enable an index-backed access path, but the actual post-action scan type must be verified by the executor.\n- **Row counts are approximate** because `EXPLAIN ANALYZE` may report per-loop statistics as rounded averages.\n- The rewrite changes only the predicate form; it does not change the projected columns, so this does not claim an Index Only Scan (the query is `SELECT *` and the single-column `created_at` index does not cover all projected columns).",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "REWRITE_QUERY"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes",
+              "propose_query_rewrite"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "REWRITE_QUERY"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info",
+          "propose_query_rewrite"
+        ],
+        "run_number": 3
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_003_seq_scan_correct",
+        "title": "Sequential scan is appropriate for broad predicate",
+        "query": "SELECT * FROM orders WHERE id > 0;",
+        "expected": {
+          "expect_no_action": true,
+          "forbidden_proposal_types": [
+            "CREATE_INDEX",
+            "REWRITE_QUERY"
+          ]
+        },
+        "required_tools": [
+          "analyze_query"
+        ],
+        "setup_sql": [],
+        "description": "The predicate matches effectively the entire table. PostgreSQL chooses a Sequential Scan even though orders.id already has the primary-key btree index. SafeDBA should recognize that the Sequential Scan is appropriate and produce no optimization proposal."
+      },
+      "result": {
+        "case_id": "case_003_seq_scan_correct",
+        "title": "Sequential scan is appropriate for broad predicate",
+        "agent_answer": "Let me analyze the evidence.\n\n**Observations**\n\nThe query is `SELECT * FROM orders WHERE id > 0;`\n\n**Evidence**\n\nFrom `analyze_query`:\n- Execution time: 87 ms\n- Scan type: **Sequential Scan** on `orders`\n- Filter: `(id > 0)`\n- Rows returned: 1,000,000\n- Rows examined: 1,000,000\n- Rows removed by filter: 0\n- **Selectivity: 1.0** — every single examined row (100%) matched the predicate\n- Cardinality error ratio: 1.0 (planner estimate is accurate)\n- No non-sargable findings\n- No cardinality findings\n\nThe table has indexes:\n- `orders_pkey` on `id` (implicitly created by the primary key/unique constraint)\n- `idx_orders_created_at` on `created_at`\n\n**Diagnosis**\n\nThe predicate `id > 0` matches **100%** of the rows in the table (selectivity = 1.0). The filter removed zero rows. Since the query returns essentially the entire table via `SELECT *`, a Sequential Scan is the **correct and expected access path**.\n\nAlthough an index on `id` exists (`orders_pkey`), using it would be counterproductive here. An Index Scan would require looking up every one of the 1 million rows in the heap via random I/O, generally *slower* than a sequential scan when nearly all rows must be returned. This is a textbook case where an index should **not** be used.\n\nThere is no missing index problem:\n- The predicate is present (`id` is indexed), but\n- The predicate is **not selective** (matches everything)\n\nNo stale statistics: cardinality_error_ratio = 1.0 indicates the planner's estimate of 1,000,000 rows exactly matches actual output. No cardinality findings were reported.\n\nNo non-sargable predicates.\n\n**Recommendation**\n\nNo optimization or maintenance action is warranted. The Sequential Scan is the appropriate access path for this query, which filters out nothing. Adding or changing an index would not help and could even degrade performance due to the extra index maintenance cost on every write.\n\nThis query is essentially a full-table read with a trivially-satisfiable predicate. If the business intent is genuinely \"return all rows,\" the `WHERE id > 0` clause is functionally redundant.\n\n**Risk / uncertainty**\n\n- The diagnosis is well-supported: the deterministic evidence shows zero selectivity benefit from the predicate and an accurate planner estimate.\n- If the true intent were to fetch only recent/subset rows, a bounded predicate on an indexed column would be needed — but that would be a different query. For this exact query, no action is recommended.\n\nNo structured proposal is submitted because the evidence does not support any safe index creation, query rewrite, or ANALYZE action.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "NO_ACTION",
+            "actual_types": []
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_indexes"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX",
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes"
+        ],
+        "run_number": 1
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_003_seq_scan_correct",
+        "title": "Sequential scan is appropriate for broad predicate",
+        "query": "SELECT * FROM orders WHERE id > 0;",
+        "expected": {
+          "expect_no_action": true,
+          "forbidden_proposal_types": [
+            "CREATE_INDEX",
+            "REWRITE_QUERY"
+          ]
+        },
+        "required_tools": [
+          "analyze_query"
+        ],
+        "setup_sql": [],
+        "description": "The predicate matches effectively the entire table. PostgreSQL chooses a Sequential Scan even though orders.id already has the primary-key btree index. SafeDBA should recognize that the Sequential Scan is appropriate and produce no optimization proposal."
+      },
+      "result": {
+        "case_id": "case_003_seq_scan_correct",
+        "title": "Sequential scan is appropriate for broad predicate",
+        "agent_answer": "Let me analyze the evidence.\n\n## Observations\n\nThe query `SELECT * FROM orders WHERE id > 0;` scans all 1,000,000 rows in the orders table via a Sequential Scan, with zero rows removed by the filter.\n\n## Evidence\n\n- **Scan type**: Sequential Scan (single loop)\n- **Rows examined**: 1,000,000\n- **Rows returned**: 1,000,000\n- **Rows removed by filter**: 0\n- **Selectivity**: 1.0 (100% of examined rows matched — the predicate is not selective at all)\n- **Cardinality error ratio**: 1.0 (planner estimation is accurate, no cardinality issues)\n- **Non-sargable findings**: none\n- **Cardinality findings**: none\n- **Execution time**: ~70.8 ms\n- **Existing indexes on orders**: `orders_pkey` on `id` (primary key), `idx_orders_created_at` on `created_at`\n\n## Diagnosis\n\nThe filter `id > 0` is **not selective**. The `id` column is a positive primary key, so every single row in the table satisfies the predicate — all 1,000,000 rows are returned, and none are removed by the filter (selectivity = 1.0). \n\nA Sequential Scan here is the **correct and appropriate** access path. There is no performance problem caused by a missing index: using the `orders_pkey` index on `id` would require reading the same 1,000,000 rows while adding index lookup overhead, and would not reduce the examined rows or improve performance. A single-column index on `id` is therefore not a valid optimization candidate for this query.\n\nNo cardinality estimation error exists (error ratio = 1.0), and there are no non-sargable predicates. Therefore no ANALYZE or rewrite proposal is warranted.\n\n## Recommendation\n\n**No optimization action proposal is submitted.**\n\nThe Sequential Scan is the appropriate access path for this query given that the predicate `id > 0` matches 100% of the table's rows. An index-backed access path would not reduce rows examined or improve the query. No missing-index, rewrite, or statistics-maintenance action is supported by the evidence.\n\n## Risk / uncertainty\n\nNo database modification is being proposed, so there is no operational risk from an action. The only uncertainty is inherent to the query itself: this is effectively a full-table read, and its cost will grow with the amount of data in the table. If the true intent of the query was to filter on something more selective (e.g., a status or date range), the predicate as written does not express that.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "NO_ACTION",
+            "actual_types": []
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_indexes"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX",
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes"
+        ],
+        "run_number": 2
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_003_seq_scan_correct",
+        "title": "Sequential scan is appropriate for broad predicate",
+        "query": "SELECT * FROM orders WHERE id > 0;",
+        "expected": {
+          "expect_no_action": true,
+          "forbidden_proposal_types": [
+            "CREATE_INDEX",
+            "REWRITE_QUERY"
+          ]
+        },
+        "required_tools": [
+          "analyze_query"
+        ],
+        "setup_sql": [],
+        "description": "The predicate matches effectively the entire table. PostgreSQL chooses a Sequential Scan even though orders.id already has the primary-key btree index. SafeDBA should recognize that the Sequential Scan is appropriate and produce no optimization proposal."
+      },
+      "result": {
+        "case_id": "case_003_seq_scan_correct",
+        "title": "Sequential scan is appropriate for broad predicate",
+        "agent_answer": "I now have all the evidence needed to provide a diagnosis.\n\n## Observations\n\nThe query `SELECT * FROM orders WHERE id > 0` examines all 1,000,000 rows in the table via a Sequential Scan. Zero rows are removed by the filter. The planner's cardinality estimate aligns perfectly with the actual result (`cardinality_error_ratio` = 1.0). There are no cardinality or non-sargable findings.\n\n## Evidence\n\n- **Scan type:** Seq Scan (single loop, no parallelism)\n- **Rows examined:** 1,000,000\n- **Rows returned:** 1,000,000\n- **Rows removed by filter:** 0\n- **Selectivity:** 1.0 (100% of examined rows match)\n- **Execution time:** ~70.5 ms\n- **Cardinality error ratio:** 1.0 (estimate exact)\n- **`id` column type:** `bigint`, NOT NULL\n- **Existing indexes:** `orders_pkey` (btree on `id`), `idx_orders_created_at` (btree on `created_at`)\n\n## Diagnosis\n\nThe predicate `id > 0` is **not selective at all**. Since `id` is a `bigint` NOT NULL primary key whose values start at 1, the condition `id > 0` matches **every** row in the table (selectivity = 1.0). The Sequential Scan examining 1,000,000 rows and returning 1,000,000 rows is the optimal access path for this query.\n\nAlthough a primary key index (`orders_pkey`) exists on `id`, PostgreSQL correctly chooses a Sequential Scan because an index-backed access path would be *slower* for this predicate — it would have to touch all 1,000,000 rows anyway. The Sequential Scan is appropriate here, not a symptom of a missing index.\n\nThis is not a performance problem requiring optimization. The query intentionally returns the full table, and no reasonable index would improve it.\n\n## Recommendation\n\n**No action proposed.** The sequential scan is the correct and optimal strategy for this predicate. There is no missing-index opportunity, no cardinality/statistics problem, and no non-sargable predicate. Creating an index here would not improve this query's performance.\n\n## Risk / uncertainty\n\nNone — no modification is proposed. If the query's *intent* was to retrieve only a subset (e.g., a typo in the range or a different predicate was intended), then a different filter would need to be benchmarked. But based on the actual SQL provided, the full-table scan is optimal.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "NO_ACTION",
+            "actual_types": []
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_indexes"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX",
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info"
+        ],
+        "run_number": 3
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_004_stale_statistics",
+        "title": "Severe cardinality error from stale statistics",
+        "query": "SELECT * FROM cardinality_test WHERE status = 'hot';",
+        "expected": {
+          "proposal_type": "ANALYZE_TABLE",
+          "table": "cardinality_test",
+          "columns": [
+            "status"
+          ],
+          "forbidden_proposal_types": [
+            "CREATE_INDEX",
+            "REWRITE_QUERY"
+          ]
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_column_stats"
+        ],
+        "setup_sql": [
+          "DROP TABLE IF EXISTS cardinality_test;",
+          "CREATE TABLE cardinality_test (id BIGINT PRIMARY KEY, status TEXT NOT NULL, payload TEXT) WITH (autovacuum_enabled = false);",
+          "INSERT INTO cardinality_test (id, status, payload) SELECT g, 'normal', md5(g::text) FROM generate_series(1, 100000) AS g;",
+          "ANALYZE cardinality_test;",
+          "UPDATE cardinality_test SET status = 'hot' WHERE id <= 50000;"
+        ],
+        "description": "Planner statistics describe status as 100% normal, but half the rows have changed to hot after ANALYZE. SafeDBA should diagnose stale statistics and propose ANALYZE_TABLE rather than an index or query rewrite."
+      },
+      "result": {
+        "case_id": "case_004_stale_statistics",
+        "title": "Severe cardinality error from stale statistics",
+        "agent_answer": "## Observations\n\n- The query performs a **Sequential Scan** of `cardinality_test`, examining 100,000 rows and returning 50,000 rows via the filter `status = 'hot'`.\n- **Selectivity is 0.5** (50% of examined rows matched) — this is a **low-selectivity, non-selective predicate**, not a selective one.\n- The committed proposal is an **ANALYZE_TABLE** for the `status` column with a risk rating of MEDIUM.\n\n## Evidence\n\n- `analyze_query`: Seq Scan, 100,000 rows examined, 50,000 returned, 50,000 removed by filter, selectivity **0.5**, execution time 9.746 ms.\n- **`SEVERE_CARDINALITY_ERROR`**: estimated output 1 row, actual 50,000 rows, error ratio **50,000x**, direction **UNDER_ESTIMATE**.\n- `get_indexes`: only `cardinality_test_pkey` on `id` exists; no index on `status`.\n- `get_column_stats`: `n_distinct = 1.0`, MCV list = `{'normal'}` with frequency `1.0`, `n_mod_since_analyze = 150,000`, `n_live_tup = 100,000`, `last_analyze = 2026-08-10`, no autoanalyze.\n\n## Diagnosis\n\n**Root cause: stale planner statistics causing severe cardinality under-estimation.**\n\nThe planner statistic for `status` is deeply inconsistent with the observed data. The MCV list contains only the value `'normal'` at frequency 1.0 (`n_distinct = 1`), so the planner predicts the predicate matches only **1 row**. In reality, `'hot'` matches **50,000 rows** (50% of the table), proving the actual distribution contains at least two distinct values.\n\nThis is *not* a missing-index problem. The predicate passes 50% of the table (selectivity 0.5), so a Sequential Scan is an appropriate access path — an index would not meaningfully improve this scan and is not warranted.\n\nThe statistics-health evidence strongly supports a stale-statistics diagnosis:\n- `n_mod_since_analyze` (150,000) substantially exceeds `n_live_tup` (100,000), indicating major modification since the last ANALYZE.\n- No autoanalyze has run.\n- The planner's MCV list directly contradicts the distribution confirmed at execution time (1.0 frequency for `'normal'` vs. 50% rows being `'hot'`).\n\n## Recommendation\n\n**Refresh planner statistics** on `cardinality_test.status` via ANALYZE (submitted as `propose_analyze_table`). This addresses the root cause: the planner's `status` column statistics are stale and inaccurate.\n\nThe expected primary effect is **improved cardinality estimation** (the error should move from 50,000x toward an accurate value reflecting the real distribution). I make no claim that this will speed up the current query — the Sequential Scan may remain the appropriate access path given the 50% selectivity.\n\n## Risk / uncertainty\n\n- ANALYZE is a maintenance operation; its actual execution and operational impact are handled by the separate safety/execution layer, not by this agent. It is not described here as risk-free or non-blocking.\n- Refreshing statistics improves planner accuracy but does not guarantee a faster execution plan for this query; the scan strategy may remain unchanged because a Sequential Scan is structurally appropriate for a 50%-selective predicate.\n- `n_mod_since_analyze` and `n_live_tup` are statistics-system estimates/approximate counters, used here only as supporting statistics-health evidence.\n- No index proposal was submitted — the evidence does not support an index as the appropriate fix for this low-selectivity predicate.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "ANALYZE_TABLE"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_column_stats"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_column_stats",
+              "get_indexes",
+              "propose_analyze_table"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX",
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "ANALYZE_TABLE"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info",
+          "get_column_stats",
+          "propose_analyze_table"
+        ],
+        "run_number": 1
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_004_stale_statistics",
+        "title": "Severe cardinality error from stale statistics",
+        "query": "SELECT * FROM cardinality_test WHERE status = 'hot';",
+        "expected": {
+          "proposal_type": "ANALYZE_TABLE",
+          "table": "cardinality_test",
+          "columns": [
+            "status"
+          ],
+          "forbidden_proposal_types": [
+            "CREATE_INDEX",
+            "REWRITE_QUERY"
+          ]
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_column_stats"
+        ],
+        "setup_sql": [
+          "DROP TABLE IF EXISTS cardinality_test;",
+          "CREATE TABLE cardinality_test (id BIGINT PRIMARY KEY, status TEXT NOT NULL, payload TEXT) WITH (autovacuum_enabled = false);",
+          "INSERT INTO cardinality_test (id, status, payload) SELECT g, 'normal', md5(g::text) FROM generate_series(1, 100000) AS g;",
+          "ANALYZE cardinality_test;",
+          "UPDATE cardinality_test SET status = 'hot' WHERE id <= 50000;"
+        ],
+        "description": "Planner statistics describe status as 100% normal, but half the rows have changed to hot after ANALYZE. SafeDBA should diagnose stale statistics and propose ANALYZE_TABLE rather than an index or query rewrite."
+      },
+      "result": {
+        "case_id": "case_004_stale_statistics",
+        "title": "Severe cardinality error from stale statistics",
+        "agent_answer": "## Observations\n\nThe query `SELECT * FROM cardinality_test WHERE status = 'hot'` runs as a Sequential Scan examining 100,000 rows, returning 50,000 rows, and removing 50,000 by the filter. The filter predicate is non-selective (selectivity 0.5, i.e., 50% of examined rows match). However, the planner estimated only **1 row** while 50,000 rows were actually returned.\n\n## Evidence\n\n- **analyze_query**: `cardinality_error_ratio = 50000`, and `cardinality_findings` reports `SEVERE_CARDINALITY_ERROR` (direction UNDER_ESTIMATE). Execution time was 9.277 ms; the scan removed 50,000 rows by filter.\n- **get_column_stats**: For `status` (type `text`, not null):\n  - `most_common_vals = {normal}`, `most_common_freqs = [1.0]` — planner statistics claim `normal` is the *only* value, so `status = 'hot'` is estimated at ~0 rows.\n  - `n_mod_since_analyze = 150000`, `n_live_tup = 100000`, `last_analyze = 2026-08-10`, `last_autoanalyze = null`.\n- **get_indexes**: Only index is the primary key on `id`; no index on `status`.\n- **get_column_info**: `status` is `text`, not nullable.\n\n## Diagnosis\n\nThis is a **stale-planner-statistics / cardinality estimation problem**, not a missing-index problem.\n\nThe planner statistics directly contradict observed reality: they record `normal` as the sole value with frequency 1.0, meaning the planner believes no row can equal `'hot'`. Yet the actual data yields 50,000 `'hot'` rows out of 100,000. This contradiction, combined with high statistics-health evidence (`n_mod_since_analyze` of 150,000 relative to `n_live_tup` of 100,000) and `last_autoanalyze = null`, indicates the data distribution changed substantially since the last ANALYZE.\n\nNo missing-index proposal is warranted. The predicate is non-selective (selectivity 0.5), so a Sequential Scan is the appropriate access path — an index scan would read half the table less efficiently. Additionally, `SELECT *` means a single-column `status` index would not support an Index Only Scan. The sequential scan itself is not the problem; the planner's wildly inaccurate row estimate is.\n\n## Recommendation\n\nRefresh planner statistics for `cartinality_test.status` (submitted as a `propose_analyze_table` proposal). The primary expected effect is more accurate cardinality estimation. I do not claim this will make the query itself faster — its physical scan strategy may remain a Sequential Scan, which is appropriate for this non-selective predicate.\n\nI have **not** proposed `CREATE INDEX`, because an index is not supported by the evidence here and would likely not help given the 50% selectivity and the `SELECT *` projection.\n\n## Risk / uncertainty\n\n- The stale-statistics diagnosis relies on `n_mod_since_analyze`, which is a statistics-system estimate, not an exact transactional counter. It is treated as supporting evidence alongside the direct contradiction between planner statistics and observed query output.\n- I have proposed the ANALYZE but have not executed it; ANALYZE is a maintenance operation whose operational impact must be evaluated by the separate safety/execution layer.\n- Refreshing statistics is not guaranteed to change the scan strategy; it primarily improves estimation accuracy so future plans are chosen from correct row-count assumptions.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "ANALYZE_TABLE"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_column_stats"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_column_stats",
+              "get_indexes",
+              "get_query_plan",
+              "propose_analyze_table"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX",
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "ANALYZE_TABLE"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info",
+          "get_column_stats",
+          "get_query_plan",
+          "propose_analyze_table"
+        ],
+        "run_number": 2
+      }
+    },
+    {
+      "case": {
+        "case_id": "case_004_stale_statistics",
+        "title": "Severe cardinality error from stale statistics",
+        "query": "SELECT * FROM cardinality_test WHERE status = 'hot';",
+        "expected": {
+          "proposal_type": "ANALYZE_TABLE",
+          "table": "cardinality_test",
+          "columns": [
+            "status"
+          ],
+          "forbidden_proposal_types": [
+            "CREATE_INDEX",
+            "REWRITE_QUERY"
+          ]
+        },
+        "required_tools": [
+          "analyze_query",
+          "get_column_stats"
+        ],
+        "setup_sql": [
+          "DROP TABLE IF EXISTS cardinality_test;",
+          "CREATE TABLE cardinality_test (id BIGINT PRIMARY KEY, status TEXT NOT NULL, payload TEXT) WITH (autovacuum_enabled = false);",
+          "INSERT INTO cardinality_test (id, status, payload) SELECT g, 'normal', md5(g::text) FROM generate_series(1, 100000) AS g;",
+          "ANALYZE cardinality_test;",
+          "UPDATE cardinality_test SET status = 'hot' WHERE id <= 50000;"
+        ],
+        "description": "Planner statistics describe status as 100% normal, but half the rows have changed to hot after ANALYZE. SafeDBA should diagnose stale statistics and propose ANALYZE_TABLE rather than an index or query rewrite."
+      },
+      "result": {
+        "case_id": "case_004_stale_statistics",
+        "title": "Severe cardinality error from stale statistics",
+        "agent_answer": "## Final Diagnosis\n\n### Observations\nThe query returns a large fraction of the table through a Sequential Scan on `cardinality_test`, filtered by `status = 'hot'`. The query itself is fast (~6–9 ms), but the planner's cardinality estimate is off by a factor of 50,000.\n\n### Evidence\n- **Scan:** Sequential Scan over `cardinality_test`, examining 100,000 rows, returning 50,000, removing 50,000 by filter.\n- **Selectivity:** 0.5 — 50% of examined rows matched. This is a **non-selective** predicate.\n- **Cardinality:** Planner estimated **1 row**; actual was **50,000**. `cardinality_error_ratio` = 50000.0 → `SEVERE_CARDINALITY_ERROR`, direction `UNDER_ESTIMATE`.\n- **Column statistics (`status`):** `n_distinct = 1.0`, MCV = `{normal}` freq `1.0`. These statistics directly contradict the observed data, which contains 50% `'hot'` values.\n- **Statistics health:** `n_mod_since_analyze` = 150,000 vs `n_live_tup` = 100,000; last ANALYZE 2026-08-10 with no autoanalyze — substantial modification since last analyze.\n- **Indexes:** Only `cardinality_test_pkey` on `id` exists. No index on `status`.\n- **Column type:** `status` is `text`.\n\n### Diagnosis\n**Root cause: severely stale planner statistics for the `status` column.**\n\nThe planner statistics are completely inconsistent with the observed data — they capture a distribution where `status` has a single value (`'normal'`), yet the current table contains 50% `'hot'` rows. This is a direct contradiction between planner statistics and observed query evidence, corroborated by the high modification count (`n_mod_since_analyze` > `n_live_tup`) and no recent autoanalyze. The 50,000× cardinality error is a deterministic symptom of this broken estimation.\n\nThe Sequential Scan is **not** a missing-index problem. With a selectivity of 0.5, the predicate reads half the table; a Sequential Scan is an appropriate access path for such a non-selective filter. Adding an index on `status` would not be a suitable optimization here.\n\n### Recommendation\nSubmit an **ANALYZE** proposal on `cardinality_test`, targeting the `status` column, to refresh the stale planner statistics and restore accurate cardinality estimation. This was submitted via `propose_analyze_table` (confidence 0.95).\n\nThe primary expected effect is improved planner statistics and accurate cardinality estimation. The physical scan strategy may remain a Sequential Scan, which remains appropriate for a predicate selecting 50% of rows. This proposal is a proposal only — it does **not** execute ANALYZE, and the safety/execution layer must handle the operation's impact separately.\n\n### Risk / uncertainty\n- Applying ANALYZE is a maintenance operation whose operational impact must be handled by the separate safety/execution layer (it is not claimed to be non-blocking or risk-free).\n- Refreshing statistics should correct the cardinality estimate, but it is not guaranteed to change the physical scan strategy, which is already appropriate given the true 50% selectivity.\n- `n_mod_since_analyze` is a statistics-system estimate and treated here only as supporting statistics-health evidence.",
+        "passed": true,
+        "evaluation": {
+          "passed": true,
+          "proposal": {
+            "passed": true,
+            "expected_type": "ANALYZE_TABLE"
+          },
+          "tools": {
+            "passed": true,
+            "required": [
+              "analyze_query",
+              "get_column_stats"
+            ],
+            "actual": [
+              "analyze_query",
+              "get_column_info",
+              "get_column_stats",
+              "get_indexes",
+              "get_query_plan",
+              "propose_analyze_table"
+            ],
+            "missing": []
+          },
+          "forbidden_actions": {
+            "passed": true,
+            "forbidden": [
+              "CREATE_INDEX",
+              "REWRITE_QUERY"
+            ],
+            "violations": []
+          },
+          "unsupported_claims": {
+            "passed": true,
+            "matches": [],
+            "reason": null
+          },
+          "decision_passed": true,
+          "evidence_fidelity_passed": true
+        },
+        "proposal_types": [
+          "ANALYZE_TABLE"
+        ],
+        "tool_trace": [
+          "analyze_query",
+          "get_indexes",
+          "get_column_info",
+          "get_column_stats",
+          "get_query_plan",
+          "propose_analyze_table"
+        ],
+        "run_number": 3
+      }
+    }
+  ]
+}

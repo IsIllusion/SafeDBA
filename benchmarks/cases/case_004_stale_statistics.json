@@ -1,0 +1,33 @@
+{
+  "case_id": "case_004_stale_statistics",
+  "title": "Severe cardinality error from stale statistics",
+
+  "query": "SELECT * FROM cardinality_test WHERE status = 'hot';",
+
+  "expected": {
+    "proposal_type": "ANALYZE_TABLE",
+    "table": "cardinality_test",
+    "columns": [
+      "status"
+    ],
+    "forbidden_proposal_types": [
+      "CREATE_INDEX",
+      "REWRITE_QUERY"
+    ]
+  },
+
+  "required_tools": [
+    "analyze_query",
+    "get_column_stats"
+  ],
+
+  "setup_sql": [
+    "DROP TABLE IF EXISTS cardinality_test;",
+    "CREATE TABLE cardinality_test (id BIGINT PRIMARY KEY, status TEXT NOT NULL, payload TEXT) WITH (autovacuum_enabled = false);",
+    "INSERT INTO cardinality_test (id, status, payload) SELECT g, 'normal', md5(g::text) FROM generate_series(1, 100000) AS g;",
+    "ANALYZE cardinality_test;",
+    "UPDATE cardinality_test SET status = 'hot' WHERE id <= 50000;"
+  ],
+
+  "description": "Planner statistics describe status as 100% normal, but half the rows have changed to hot after ANALYZE. SafeDBA should diagnose stale statistics and propose ANALYZE_TABLE rather than an index or query rewrite."
+}

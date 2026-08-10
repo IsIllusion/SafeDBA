@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: safedba-postgres
+    environment:
+      POSTGRES_USER: safedba
+      POSTGRES_PASSWORD: safedba
+      POSTGRES_DB: benchmark
+    ports:
+      - "15432:5432"
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

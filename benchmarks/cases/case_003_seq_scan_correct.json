@@ -1,0 +1,23 @@
+{
+  "case_id": "case_003_seq_scan_correct",
+  "title": "Sequential scan is appropriate for broad predicate",
+
+  "query": "SELECT * FROM orders WHERE id > 0;",
+
+  "expected": {
+    "expect_no_action": true,
+
+    "forbidden_proposal_types": [
+      "CREATE_INDEX",
+      "REWRITE_QUERY"
+    ]
+  },
+
+  "required_tools": [
+    "analyze_query"
+  ],
+
+  "setup_sql": [],
+
+  "description": "The predicate matches effectively the entire table. PostgreSQL chooses a Sequential Scan even though orders.id already has the primary-key btree index. SafeDBA should recognize that the Sequential Scan is appropriate and produce no optimization proposal."
+}
