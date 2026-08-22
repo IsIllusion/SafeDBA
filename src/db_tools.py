@@ -1,60 +1,433 @@
 ﻿import statistics
 
+import hashlib
+import json
+from contextlib import contextmanager
+from datetime import (
+    datetime,
+    timezone,
+)
+
 import psycopg
 from psycopg import sql
 
 from config import (
     DB_CONFIG,
+    DB_INCLUDE_OBSERVED_QUERY_TEXT,
+    DB_LOCK_TIMEOUT_MS,
+    DB_MAX_EXPLAIN_TOTAL_COST,
+    DB_MAX_OBSERVATION_ROWS,
+    DB_MAX_OBSERVED_QUERY_CHARS,
+    DB_MAX_QUERY_LENGTH,
+    DB_STATEMENT_TIMEOUT_MS,
+    EXECUTOR_DB_CONFIG,
     HEALTH_LONG_QUERY_SECONDS,
     HEALTH_LONG_TRANSACTION_SECONDS,
+    TERMINATOR_DB_CONFIG,
+)
+
+from query_guard import (
+    ensure_read_only_query as enforce_query_policy,
 )
 
 def ensure_read_only_query(
     query: str,
 ) -> str:
+    return enforce_query_policy(
+        query,
+        max_length=DB_MAX_QUERY_LENGTH,
+    )
 
-    normalized = query.strip()
 
-    # Allow one trailing semicolon.
-    if normalized.endswith(";"):
-        normalized = (
-            normalized[:-1].strip()
+@contextmanager
+def readonly_connection():
+    """Open a bounded, transaction-level read-only connection."""
+
+    with psycopg.connect(
+        **DB_CONFIG
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SET TRANSACTION READ ONLY"
+            )
+            cur.execute(
+                "SET LOCAL standard_conforming_strings = on"
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'statement_timeout', %s, true)",
+                (str(DB_STATEMENT_TIMEOUT_MS),),
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'lock_timeout', %s, true)",
+                (str(DB_LOCK_TIMEOUT_MS),),
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'idle_in_transaction_session_timeout', "
+                "%s, true)",
+                (str(DB_STATEMENT_TIMEOUT_MS),),
+            )
+
+        yield conn
+
+
+@contextmanager
+def executor_connection():
+    """Open a bounded connection for deterministic mutations."""
+
+    with psycopg.connect(
+        **EXECUTOR_DB_CONFIG
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT set_config("
+                "'statement_timeout', %s, true)",
+                (str(DB_STATEMENT_TIMEOUT_MS),),
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'lock_timeout', %s, true)",
+                (str(DB_LOCK_TIMEOUT_MS),),
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'idle_in_transaction_session_timeout', "
+                "%s, true)",
+                (str(DB_STATEMENT_TIMEOUT_MS),),
+            )
+
+        yield conn
+
+
+@contextmanager
+def terminator_connection():
+    """Open a bounded connection that can signal, but not mutate, data."""
+
+    with psycopg.connect(
+        **TERMINATOR_DB_CONFIG
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SET TRANSACTION READ ONLY"
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'statement_timeout', %s, true)",
+                (str(DB_STATEMENT_TIMEOUT_MS),),
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'lock_timeout', %s, true)",
+                (str(DB_LOCK_TIMEOUT_MS),),
+            )
+            cur.execute(
+                "SELECT set_config("
+                "'idle_in_transaction_session_timeout', "
+                "%s, true)",
+                (str(DB_STATEMENT_TIMEOUT_MS),),
+            )
+
+        yield conn
+
+
+def _inspect_runtime_identity(
+    config: dict,
+) -> dict:
+    statement = """
+    SELECT
+        current_user,
+        current_database(),
+        role.rolsuper,
+        role.rolcreaterole,
+        role.rolcreatedb,
+        role.rolreplication,
+        role.rolbypassrls,
+        current_setting(
+            'default_transaction_read_only'
+        )::boolean,
+        has_database_privilege(
+            current_user,
+            current_database(),
+            'TEMPORARY'
+        ),
+        has_schema_privilege(
+            current_user,
+            'public',
+            'CREATE'
+        ),
+        pg_has_role(
+            current_user,
+            'pg_signal_backend',
+            'MEMBER'
+        ),
+        EXISTS (
+            SELECT 1
+            FROM pg_class AS relation
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND (
+                  has_table_privilege(
+                      current_user, relation.oid, 'INSERT'
+                  )
+                  OR has_table_privilege(
+                      current_user, relation.oid, 'UPDATE'
+                  )
+                  OR has_table_privilege(
+                      current_user, relation.oid, 'DELETE'
+                  )
+                  OR has_table_privilege(
+                      current_user, relation.oid, 'TRUNCATE'
+                  )
+                  OR has_table_privilege(
+                      current_user, relation.oid, 'TRIGGER'
+                  )
+              )
+        )
+    FROM pg_roles AS role
+    WHERE role.rolname = current_user;
+    """
+
+    with psycopg.connect(**config) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                statement,
+                prepare=True,
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            "Could not inspect the configured PostgreSQL identity."
         )
 
-    # Reject multiple SQL statements.
-    if ";" in normalized:
-        raise ValueError(
-            "Multiple SQL statements "
-            "are not allowed."
+    return {
+        "user": row[0],
+        "database": row[1],
+        "superuser": row[2],
+        "create_role": row[3],
+        "create_database": row[4],
+        "replication": row[5],
+        "bypass_rls": row[6],
+        "default_read_only": row[7],
+        "temporary": row[8],
+        "schema_create": row[9],
+        "signal_backend": row[10],
+        "table_write_privilege": row[11],
+    }
+
+
+def verify_runtime_security() -> dict:
+    """Fail before LLM use when configured DB roles violate policy."""
+
+    identities = {
+        "observer": _inspect_runtime_identity(DB_CONFIG),
+        "executor": _inspect_runtime_identity(EXECUTOR_DB_CONFIG),
+        "terminator": _inspect_runtime_identity(TERMINATOR_DB_CONFIG),
+    }
+    actual_users = {
+        identity["user"]
+        for identity in identities.values()
+    }
+    errors = []
+
+    if len(actual_users) != 3:
+        errors.append(
+            "Observer, executor, and terminator must be distinct users."
         )
 
-    if not normalized.upper().startswith(
-        "SELECT"
+    if len({
+        identity["database"]
+        for identity in identities.values()
+    }) != 1:
+        errors.append(
+            "All runtime identities must target the same database."
+        )
+
+    for label, identity in identities.items():
+        if identity["user"] != {
+            "observer": DB_CONFIG["user"],
+            "executor": EXECUTOR_DB_CONFIG["user"],
+            "terminator": TERMINATOR_DB_CONFIG["user"],
+        }[label]:
+            errors.append(
+                f"{label} current_user does not match its configuration."
+            )
+        if any(
+            identity[capability]
+            for capability in (
+                "superuser",
+                "create_role",
+                "create_database",
+                "replication",
+                "bypass_rls",
+            )
+        ):
+            errors.append(
+                f"{label} has a forbidden cluster-level capability."
+            )
+
+    observer = identities["observer"]
+    if not observer["default_read_only"]:
+        errors.append("Observer default transactions are not read-only.")
+    if any(
+        observer[capability]
+        for capability in (
+            "temporary",
+            "schema_create",
+            "signal_backend",
+            "table_write_privilege",
+        )
     ):
-        raise ValueError(
-            "SafeDBA currently allows "
-            "only read-only SELECT queries."
+        errors.append(
+            "Observer has temporary, create, signal, or table-write rights."
         )
 
-    return normalized
+    executor = identities["executor"]
+    if executor["signal_backend"]:
+        errors.append(
+            "Maintenance executor must not have pg_signal_backend."
+        )
+    if not executor["schema_create"]:
+        errors.append(
+            "Maintenance executor lacks CREATE on the managed schema."
+        )
+
+    terminator = identities["terminator"]
+    if not terminator["default_read_only"]:
+        errors.append("Terminator default transactions are not read-only.")
+    if (
+        not terminator["signal_backend"]
+        or terminator["temporary"]
+        or terminator["schema_create"]
+        or terminator["table_write_privilege"]
+    ):
+        errors.append(
+            "Terminator must have only read visibility and backend signal "
+            "authority."
+        )
+
+    if errors:
+        raise RuntimeError(
+            "Unsafe PostgreSQL runtime identity configuration: "
+            + " ".join(errors)
+            + " Recreate/migrate the demo roles before running SafeDBA."
+        )
+
+    return identities
+
+
+def truncate_observed_query(
+    value: str | None,
+) -> str | None:
+    if value is None:
+        return value
+
+    if not DB_INCLUDE_OBSERVED_QUERY_TEXT:
+        return (
+            "[redacted query sha256="
+            + hashlib.sha256(
+                value.encode("utf-8")
+            ).hexdigest()
+            + f" characters={len(value)}]"
+        )
+
+    if len(value) <= DB_MAX_OBSERVED_QUERY_CHARS:
+        return value
+
+    return (
+        value[:DB_MAX_OBSERVED_QUERY_CHARS]
+        + "...[truncated]"
+    )
+
+
+def _run_explain(
+    query: str,
+    *,
+    analyze: bool,
+) -> dict:
+    query = ensure_read_only_query(
+        query
+    )
+
+    options = (
+        "ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON"
+        if analyze
+        else "FORMAT JSON"
+    )
+    explain_sql = (
+        f"EXPLAIN ({options})\n{query}"
+    )
+
+    with readonly_connection() as conn:
+        with conn.cursor() as cur:
+            # prepare=True forces PostgreSQL's extended protocol, whose
+            # Parse step accepts exactly one statement.  This remains a
+            # separate safety boundary from the client-side SQL policy.
+            cur.execute(
+                explain_sql,
+                prepare=True,
+            )
+            result = cur.fetchone()
+
+    if not result or not result[0]:
+        raise RuntimeError(
+            "PostgreSQL returned an empty EXPLAIN result."
+        )
+
+    return result[0][0]
+
+
+def get_estimated_query_plan(
+    query: str,
+) -> dict:
+    """Plan a diagnostic query without executing it."""
+
+    return _run_explain(
+        query,
+        analyze=False,
+    )
 
 
 def get_query_plan(query: str) -> dict:
-    query = ensure_read_only_query(
-                query
-                )
+    """Run bounded EXPLAIN ANALYZE after a cost-only preflight."""
 
-    explain_sql = f"""
-    EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-    {query}
-    """
+    estimated_plan = get_estimated_query_plan(
+        query
+    )
+    total_cost = (
+        estimated_plan.get("Plan", {})
+        .get("Total Cost")
+    )
 
-    with psycopg.connect(**DB_CONFIG) as conn:
-        with conn.cursor() as cur:
-            cur.execute(explain_sql)
-            result = cur.fetchone()
+    if total_cost is None:
+        raise RuntimeError(
+            "Estimated plan did not contain Total Cost."
+        )
 
-    return result[0][0]
+    if total_cost > DB_MAX_EXPLAIN_TOTAL_COST:
+        raise ValueError(
+            "EXPLAIN ANALYZE blocked by the cost policy: "
+            f"estimated total cost {total_cost} exceeds "
+            f"{DB_MAX_EXPLAIN_TOTAL_COST}. Use the estimated "
+            "plan or an isolated environment instead."
+        )
+
+    analyzed_plan = _run_explain(
+        query,
+        analyze=True,
+    )
+    analyzed_plan["SafeDBA Preflight"] = {
+        "estimated_total_cost": total_cost,
+        "maximum_total_cost": (
+            DB_MAX_EXPLAIN_TOTAL_COST
+        ),
+    }
+
+    return analyzed_plan
 
 
 def get_indexes(table_name: str) -> list[dict]:
@@ -68,7 +441,7 @@ def get_indexes(table_name: str) -> list[dict]:
     ORDER BY indexname;
     """
 
-    with psycopg.connect(**DB_CONFIG) as conn:
+    with readonly_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 query,
@@ -98,7 +471,7 @@ def get_table_columns(
     ORDER BY ordinal_position;
     """
 
-    with psycopg.connect(**DB_CONFIG) as conn:
+    with readonly_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 query,
@@ -129,7 +502,7 @@ def get_column_info(
       AND column_name = %s;
     """
 
-    with psycopg.connect(**DB_CONFIG) as conn:
+    with readonly_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 query,
@@ -183,9 +556,7 @@ def get_column_stats(
       AND relname = %s;
     """
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with readonly_connection() as conn:
 
         with conn.cursor() as cur:
 
@@ -374,9 +745,7 @@ def get_database_health() -> dict:
     FROM activity;
     """
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with readonly_connection() as conn:
 
         with conn.cursor() as cur:
 
@@ -508,17 +877,17 @@ def get_active_sessions() -> list[dict]:
 
     ORDER BY
         query_start ASC NULLS LAST,
-        pid ASC;
+        pid ASC
+    LIMIT %s;
     """
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with readonly_connection() as conn:
 
         with conn.cursor() as cur:
 
             cur.execute(
-                query
+                query,
+                (DB_MAX_OBSERVATION_ROWS,),
             )
 
             rows = cur.fetchall()
@@ -531,7 +900,9 @@ def get_active_sessions() -> list[dict]:
             "state": row[3],
             "wait_event_type": row[4],
             "wait_event": row[5],
-            "query": row[6],
+            "query": truncate_observed_query(
+                row[6]
+            ),
 
             "query_start": (
                 row[7].isoformat()
@@ -637,12 +1008,11 @@ def get_transaction_sessions() -> list[dict]:
 
     ORDER BY
         xact_start ASC,
-        pid ASC;
+        pid ASC
+    LIMIT %s;
     """
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with readonly_connection() as conn:
 
         with conn.cursor() as cur:
 
@@ -650,6 +1020,7 @@ def get_transaction_sessions() -> list[dict]:
                 query,
                 (
                     HEALTH_LONG_TRANSACTION_SECONDS,
+                    DB_MAX_OBSERVATION_ROWS,
                 ),
             )
 
@@ -663,7 +1034,9 @@ def get_transaction_sessions() -> list[dict]:
             "state": row[3],
             "wait_event_type": row[4],
             "wait_event": row[5],
-            "query": row[6],
+            "query": truncate_observed_query(
+                row[6]
+            ),
 
             "query_start": (
                 row[7].isoformat()
@@ -697,7 +1070,7 @@ def get_transaction_sessions() -> list[dict]:
         for row in rows
     ]
 
-def get_lock_waits() -> list[dict]:
+def get_lock_graph_snapshot() -> dict:
 
     query = """
     SELECT
@@ -713,6 +1086,7 @@ def get_lock_waits() -> list[dict]:
         blocked.query AS blocked_query,
         blocked.query_start AS blocked_query_start,
         blocked.xact_start AS blocked_xact_start,
+        blocked.backend_start AS blocked_backend_start,
 
         EXTRACT(
             EPOCH FROM (
@@ -735,6 +1109,8 @@ def get_lock_waits() -> list[dict]:
         blocker.pid AS blocker_pid,
         blocker.usename AS blocker_user,
         blocker.application_name AS blocker_application,
+        blocker.datname AS blocker_database_name,
+        blocker.backend_type AS blocker_backend_type,
 
         blocker.state AS blocker_state,
         blocker.wait_event_type AS blocker_wait_event_type,
@@ -743,6 +1119,8 @@ def get_lock_waits() -> list[dict]:
         blocker.query AS blocker_query,
         blocker.query_start AS blocker_query_start,
         blocker.xact_start AS blocker_xact_start,
+
+        blocker.backend_start AS blocker_backend_start,
 
         CASE
             WHEN blocker.xact_start IS NOT NULL
@@ -810,21 +1188,28 @@ def get_lock_waits() -> list[dict]:
         ON true
 
     WHERE blocked.pid <> pg_backend_pid()
+      AND blocked.datname = current_database()
+      AND blocker.datname = current_database()
 
     ORDER BY
         blocked.query_start ASC,
-        blocker.pid ASC;
+        blocker.pid ASC
+    LIMIT %s;
     """
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with readonly_connection() as conn:
 
         with conn.cursor() as cur:
 
-            cur.execute(query)
+            cur.execute(
+                query,
+                (DB_MAX_OBSERVATION_ROWS + 1,),
+            )
 
             rows = cur.fetchall()
+
+    truncated = len(rows) > DB_MAX_OBSERVATION_ROWS
+    rows = rows[:DB_MAX_OBSERVATION_ROWS]
 
     results = []
 
@@ -860,7 +1245,9 @@ def get_lock_waits() -> list[dict]:
             ),
 
             "blocked_query": (
-                row[7]
+                truncate_observed_query(
+                    row[7]
+                )
             ),
 
             "blocked_query_start": (
@@ -875,78 +1262,155 @@ def get_lock_waits() -> list[dict]:
                 else None
             ),
 
-            "blocked_query_duration_seconds": (
-                float(row[10])
+            "blocked_backend_start": (
+                row[10].isoformat()
                 if row[10] is not None
                 else None
             ),
 
-            "blocked_transaction_age_seconds": (
+            "blocked_query_duration_seconds": (
                 float(row[11])
                 if row[11] is not None
                 else None
             ),
 
-            "blocker_pid": (
-                row[12]
+            "blocked_transaction_age_seconds": (
+                float(row[12])
+                if row[12] is not None
+                else None
             ),
 
-            "blocker_user": (
+            "blocker_pid": (
                 row[13]
             ),
 
-            "blocker_application": (
+            "blocker_user": (
                 row[14]
             ),
 
-            "blocker_state": (
+            "blocker_application": (
                 row[15]
             ),
 
-            "blocker_wait_event_type": (
+            "blocker_database_name": (
                 row[16]
             ),
 
-            "blocker_wait_event": (
+            "blocker_backend_type": (
                 row[17]
             ),
 
-            "blocker_query": (
+            "blocker_state": (
                 row[18]
             ),
 
+            "blocker_wait_event_type": (
+                row[19]
+            ),
+
+            "blocker_wait_event": (
+                row[20]
+            ),
+
+            "blocker_query": (
+                truncate_observed_query(
+                    row[21]
+                )
+            ),
+
             "blocker_query_start": (
-                row[19].isoformat()
-                if row[19] is not None
+                row[22].isoformat()
+                if row[22] is not None
                 else None
             ),
 
             "blocker_xact_start": (
-                row[20].isoformat()
-                if row[20] is not None
+                row[23].isoformat()
+                if row[23] is not None
                 else None
             ),
 
             "blocker_transaction_age_seconds": (
-                float(row[21])
-                if row[21] is not None
+                float(row[25])
+                if row[25] is not None
+                else None
+            ),
+
+            "blocker_backend_start": (
+                row[24].isoformat()
+                if row[24] is not None
                 else None
             ),
 
             "waiting_locks": (
-                row[22]
-                if row[22] is not None
+                row[26]
+                if row[26] is not None
                 else []
             ),
         })
 
-    return results
+    captured_at = datetime.now(
+        timezone.utc
+    ).isoformat()
+    digest_rows = [
+        {
+            "database_name": row.get("database_name"),
+            "blocked_pid": row.get("blocked_pid"),
+            "blocked_backend_start": row.get(
+                "blocked_backend_start"
+            ),
+            "blocked_xact_start": row.get(
+                "blocked_xact_start"
+            ),
+            "blocker_pid": row.get("blocker_pid"),
+            "blocker_backend_start": row.get(
+                "blocker_backend_start"
+            ),
+            "blocker_xact_start": row.get(
+                "blocker_xact_start"
+            ),
+            "blocker_state": row.get("blocker_state"),
+        }
+        for row in results
+    ]
+    snapshot_digest = hashlib.sha256(
+        json.dumps(
+            digest_rows,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    return {
+        "captured_at": captured_at,
+        "database_name": (
+            results[0].get("database_name")
+            if results
+            else DB_CONFIG.get("dbname")
+        ),
+        "rows": results,
+        "row_count": len(results),
+        "truncated": truncated,
+        "snapshot_digest": snapshot_digest,
+    }
+
+
+def get_lock_waits() -> list[dict]:
+    """Compatibility wrapper for the Agent observation tool."""
+    return get_lock_graph_snapshot()["rows"]
 
 
 def terminate_blocking_backend(
     blocked_pid: int,
     blocker_pid: int,
+    blocker_backend_start: str,
+    blocker_xact_start: str,
     timeout_ms: int = 5000,
+    *,
+    blocked_backend_start: str,
+    blocked_xact_start: str,
 ) -> dict:
 
     statement = """
@@ -976,6 +1440,12 @@ def terminate_blocking_backend(
             blocked.query
                 AS blocked_query,
 
+            blocked.xact_start
+                AS blocked_xact_start,
+
+            blocked.backend_start
+                AS blocked_backend_start,
+
             blocker.pid
                 AS blocker_pid,
 
@@ -997,6 +1467,9 @@ def terminate_blocking_backend(
             blocker.xact_start
                 AS blocker_xact_start,
 
+            blocker.backend_start
+                AS blocker_backend_start,
+
             blocker.pid = ANY(
                 pg_blocking_pids(
                     blocked.pid
@@ -1011,6 +1484,10 @@ def terminate_blocking_backend(
             ON blocker.pid = %s
 
         WHERE blocked.pid = %s
+          AND blocked.backend_start = %s::timestamptz
+          AND blocked.xact_start = %s::timestamptz
+          AND blocker.backend_start = %s::timestamptz
+          AND blocker.xact_start = %s::timestamptz
     )
 
     SELECT
@@ -1023,6 +1500,8 @@ def terminate_blocking_backend(
         blocked_wait_event_type,
         blocked_wait_event,
         blocked_query,
+        blocked_xact_start,
+        blocked_backend_start,
 
         blocker_pid,
         blocker_database,
@@ -1031,6 +1510,7 @@ def terminate_blocking_backend(
         blocker_state,
         blocker_query,
         blocker_xact_start,
+        blocker_backend_start,
 
         still_blocking,
 
@@ -1094,9 +1574,7 @@ def terminate_blocking_backend(
     FROM evidence;
     """
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with terminator_connection() as conn:
 
         with conn.cursor() as cur:
 
@@ -1105,6 +1583,10 @@ def terminate_blocking_backend(
                 (
                     blocker_pid,
                     blocked_pid,
+                    blocked_backend_start,
+                    blocked_xact_start,
+                    blocker_backend_start,
+                    blocker_xact_start,
                     timeout_ms,
                 ),
             )
@@ -1142,39 +1624,63 @@ def terminate_blocking_backend(
         ),
 
         "blocked_query": (
-            row[7]
+            truncate_observed_query(
+                row[7]
+            )
         ),
 
-        "blocker_pid": row[8],
+        "blocked_xact_start": (
+            row[8].isoformat()
+            if row[8] is not None
+            else None
+        ),
 
-        "blocker_database": row[9],
+        "blocked_backend_start": (
+            row[9].isoformat()
+            if row[9] is not None
+            else None
+        ),
 
-        "blocker_user": row[10],
+        "blocker_pid": row[10],
+
+        "blocker_database": row[11],
+
+        "blocker_user": row[12],
 
         "blocker_backend_type": (
-            row[11]
+            row[13]
         ),
 
-        "blocker_state": row[12],
+        "blocker_state": row[14],
 
-        "blocker_query": row[13],
+        "blocker_query": (
+            truncate_observed_query(
+                row[15]
+            )
+        ),
 
         "blocker_xact_start": (
-            row[14].isoformat()
-            if row[14] is not None
+            row[16].isoformat()
+            if row[16] is not None
+            else None
+        ),
+
+        "blocker_backend_start": (
+            row[17].isoformat()
+            if row[17] is not None
             else None
         ),
 
         "still_blocking": (
-            row[15]
+            row[18]
         ),
 
         "final_validation_passed": (
-            row[16]
+            row[19]
         ),
 
         "terminated": (
-            row[17]
+            row[20]
         ),
     }
 
@@ -1183,19 +1689,54 @@ def create_index(
     table: str,
     column: str,
     index_name: str,
-) -> None:
+) -> dict:
 
     statement = sql.SQL(
         "CREATE INDEX {} ON {} ({})"
     ).format(
+        # PostgreSQL places an index in its table's schema and doesn't
+        # allow a schema-qualified index name in CREATE INDEX.
         sql.Identifier(index_name),
-        sql.Identifier(table),
+        sql.Identifier("public", table),
         sql.Identifier(column),
     )
 
-    with psycopg.connect(**DB_CONFIG) as conn:
+    with executor_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(statement)
+            cur.execute(
+                """
+                SELECT
+                    index_relation.oid,
+                    table_relation.oid,
+                    namespace.nspname,
+                    index_relation.relname
+                FROM pg_class AS index_relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = index_relation.relnamespace
+                JOIN pg_index AS index_metadata
+                  ON index_metadata.indexrelid = index_relation.oid
+                JOIN pg_class AS table_relation
+                  ON table_relation.oid = index_metadata.indrelid
+                WHERE namespace.nspname = 'public'
+                  AND index_relation.relname = %s
+                  AND table_relation.relname = %s;
+                """,
+                (index_name, table),
+            )
+            identity = cur.fetchone()
+
+    if identity is None:
+        raise RuntimeError(
+            "Created index could not be rebound to its catalog identity."
+        )
+
+    return {
+        "index_oid": identity[0],
+        "table_oid": identity[1],
+        "schema": identity[2],
+        "index_name": identity[3],
+    }
 
 
 
@@ -1206,9 +1747,7 @@ def analyze_table(
 
     columns = columns or []
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with executor_connection() as conn:
 
         with conn.cursor() as cur:
 
@@ -1227,7 +1766,8 @@ def analyze_table(
                     "ANALYZE {} ({})"
                 ).format(
                     sql.Identifier(
-                        table_name
+                        "public",
+                        table_name,
                     ),
                     column_sql,
                 )
@@ -1238,7 +1778,8 @@ def analyze_table(
                     "ANALYZE {}"
                 ).format(
                     sql.Identifier(
-                        table_name
+                        "public",
+                        table_name,
                     )
                 )
 
@@ -1248,15 +1789,46 @@ def analyze_table(
 
 
 
-def drop_index(index_name: str) -> None:
+def drop_index(
+    index_name: str,
+    *,
+    expected_index_oid: int,
+    expected_table_oid: int,
+) -> None:
     statement = sql.SQL(
         "DROP INDEX {}"
     ).format(
-        sql.Identifier(index_name)
+        sql.Identifier("public", index_name)
     )
 
-    with psycopg.connect(**DB_CONFIG) as conn:
+    with executor_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    index_relation.oid,
+                    table_relation.oid
+                FROM pg_class AS index_relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = index_relation.relnamespace
+                JOIN pg_index AS index_metadata
+                  ON index_metadata.indexrelid = index_relation.oid
+                JOIN pg_class AS table_relation
+                  ON table_relation.oid = index_metadata.indrelid
+                WHERE namespace.nspname = 'public'
+                  AND index_relation.relname = %s;
+                """,
+                (index_name,),
+            )
+            identity = cur.fetchone()
+            if identity != (
+                expected_index_oid,
+                expected_table_oid,
+            ):
+                raise RuntimeError(
+                    "Rollback target no longer matches the index/table "
+                    "catalog identity created by this operation."
+                )
             cur.execute(statement)
 
 def compare_query_results(
@@ -1319,14 +1891,13 @@ def compare_query_results(
         ) AS only_rewritten_count;
     """
 
-    with psycopg.connect(
-        **DB_CONFIG
-    ) as conn:
+    with readonly_connection() as conn:
 
         with conn.cursor() as cur:
 
             cur.execute(
-                comparison_sql
+                comparison_sql,
+                prepare=True,
             )
 
             row = cur.fetchone()
@@ -1345,6 +1916,12 @@ def compare_query_results(
 
     return {
         "equivalent": equivalent,
+
+        "comparison_scope": (
+            "CURRENT_SNAPSHOT_UNORDERED_ROW_MULTISET"
+        ),
+
+        "semantic_equivalence_proven": False,
 
         "original_count": (
             original_count

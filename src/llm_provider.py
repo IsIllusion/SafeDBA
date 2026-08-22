@@ -5,6 +5,7 @@ from openai import OpenAI
 from config import (
     LLM_API_KEY,
     LLM_BASE_URL,
+    LLM_MAX_COMPLETION_TOKENS,
     LLM_MAX_RETRIES,
     LLM_MODEL,
     LLM_PROVIDER,
@@ -38,6 +39,7 @@ class OpenAICompatibleProvider:
         reasoning_effort: str,
         timeout_seconds: float,
         max_retries: int,
+        max_completion_tokens: int = 2_500,
     ) -> None:
 
         self.provider_name = (
@@ -62,6 +64,10 @@ class OpenAICompatibleProvider:
         self.max_retries = (
             max_retries
             )
+
+        self.max_completion_tokens = (
+            max_completion_tokens
+        )
 
 
         if not api_key:
@@ -211,6 +217,9 @@ class OpenAICompatibleProvider:
         request_kwargs = {
             "model": self.model,
             "messages": messages,
+            "max_tokens": (
+                self.max_completion_tokens
+            ),
         }
 
         if tools is not None:
@@ -318,6 +327,9 @@ def get_llm_provider(
                 ),
                 max_retries=(
                     LLM_MAX_RETRIES
+                ),
+                max_completion_tokens=(
+                    LLM_MAX_COMPLETION_TOKENS
                 ),
             )
         )

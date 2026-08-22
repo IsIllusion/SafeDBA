@@ -3,11 +3,12 @@ services:
     image: postgres:16
     container_name: safedba-postgres
     environment:
-      POSTGRES_USER: safedba
-      POSTGRES_PASSWORD: safedba
+      # Bootstrap identity only. SafeDBA never uses this role at runtime.
+      POSTGRES_USER: safedba_bootstrap
+      POSTGRES_PASSWORD: local-bootstrap-only
       POSTGRES_DB: benchmark
     ports:
-      - "15432:5432"
+      - "127.0.0.1:15432:5432"
     volumes:
       - ./sql:/docker-entrypoint-initdb.d
       - postgres_data:/var/lib/postgresql/data

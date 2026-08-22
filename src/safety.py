@@ -1,5 +1,8 @@
 ﻿RISK_LEVELS = {
     "EXPLAIN": "LOW",
+    # Runs only through the observer role, READ ONLY transaction,
+    # preflight cost gate, extended single-statement protocol, and timeout.
+    "EXPLAIN_ANALYZE": "LOW",
     "SELECT": "LOW",
     "REWRITE_QUERY": "LOW",
 
@@ -7,7 +10,7 @@
     "ANALYZE": "MEDIUM",
     "ANALYZE_TABLE": "MEDIUM",
 
-    "ALTER_SYSTEM": "HIGH",
+    "ALTER_SYSTEM": "CRITICAL",
     "UPDATE": "HIGH",
     "DELETE": "HIGH",
     "DROP_INDEX": "HIGH",

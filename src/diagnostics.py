@@ -5,6 +5,227 @@ from db_tools import (
 )
 
 
+_EXPRESSION_KEYWORDS = frozenset({
+    "all",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "between",
+    "bigint",
+    "bigserial",
+    "bit",
+    "boolean",
+    "both",
+    "case",
+    "char",
+    "character",
+    "collate",
+    "current",
+    "date",
+    "decimal",
+    "desc",
+    "distinct",
+    "double",
+    "else",
+    "end",
+    "false",
+    "inet",
+    "integer",
+    "interval",
+    "json",
+    "jsonb",
+    "from",
+    "in",
+    "is",
+    "leading",
+    "like",
+    "not",
+    "null",
+    "nulls",
+    "numeric",
+    "or",
+    "overlaps",
+    "placing",
+    "precision",
+    "real",
+    "serial",
+    "smallint",
+    "smallserial",
+    "similar",
+    "some",
+    "symmetric",
+    "text",
+    "then",
+    "time",
+    "timestamp",
+    "trailing",
+    "true",
+    "unknown",
+    "uuid",
+    "varchar",
+    "varying",
+    "when",
+    "with",
+    "without",
+    "zone",
+})
+
+
+_IDENTIFIER_COMPONENT = (
+    r'(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
+)
+_IDENTIFIER_CHAIN = re.compile(
+    _IDENTIFIER_COMPONENT
+    + rf"(?:\s*\.\s*{_IDENTIFIER_COMPONENT})*"
+)
+_TYPE_CAST = re.compile(
+    rf"::\s*{_IDENTIFIER_COMPONENT}"
+    rf"(?:\s*\.\s*{_IDENTIFIER_COMPONENT})?"
+    r"(?:\s*\[\s*\])*"
+)
+_COLLATION = re.compile(
+    rf"\bCOLLATE\s+{_IDENTIFIER_COMPONENT}"
+    rf"(?:\s*\.\s*{_IDENTIFIER_COMPONENT})?",
+    re.IGNORECASE,
+)
+
+
+def _mask_expression_literals(expression: str) -> str:
+    """Mask constants while preserving positions of SQL identifiers."""
+
+    output = list(expression)
+    index = 0
+    length = len(expression)
+
+    while index < length:
+        if expression[index] == "'":
+            escaped_string = bool(
+                index > 0
+                and expression[index - 1] in {"e", "E"}
+                and (
+                    index < 2
+                    or not (
+                        expression[index - 2].isalnum()
+                        or expression[index - 2] in {"_", "$"}
+                    )
+                )
+            )
+            if escaped_string:
+                output[index - 1] = " "
+            output[index] = " "
+            index += 1
+            while index < length:
+                output[index] = " "
+                if (
+                    escaped_string
+                    and expression[index] == "\\"
+                    and index + 1 < length
+                ):
+                    output[index + 1] = " "
+                    index += 2
+                    continue
+                if expression[index] == "'":
+                    if (
+                        index + 1 < length
+                        and expression[index + 1] == "'"
+                    ):
+                        output[index + 1] = " "
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+
+        if expression[index] == "$":
+            delimiter_match = re.match(
+                r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$",
+                expression[index:],
+            )
+            if delimiter_match:
+                delimiter = delimiter_match.group(0)
+                closing = expression.find(
+                    delimiter,
+                    index + len(delimiter),
+                )
+                end = (
+                    length
+                    if closing < 0
+                    else closing + len(delimiter)
+                )
+                for position in range(index, end):
+                    output[position] = " "
+                index = end
+                continue
+
+        index += 1
+
+    return "".join(output)
+
+
+def extract_predicate_columns(expression: object) -> list[str]:
+    """Return conservative column identifiers from a plan predicate.
+
+    PostgreSQL's JSON plan exposes predicates as rendered expressions rather
+    than an AST.  This lexer masks constants, casts, collations, function
+    names, and SQL keywords before producing a structured column set.  The
+    authorization layer consumes only this set and never searches raw text.
+    """
+
+    if not isinstance(expression, str) or not expression.strip():
+        return []
+
+    masked = _mask_expression_literals(expression)
+    masked = _TYPE_CAST.sub(
+        lambda match: " " * len(match.group(0)),
+        masked,
+    )
+    masked = _COLLATION.sub(
+        lambda match: " " * len(match.group(0)),
+        masked,
+    )
+
+    columns: list[str] = []
+    seen: set[str] = set()
+
+    for match in _IDENTIFIER_CHAIN.finditer(masked):
+        raw = match.group(0)
+        following = masked[match.end():].lstrip()
+        preceding = masked[:match.start()]
+
+        # A name followed by '(' is a function/operator name, not a column.
+        if following.startswith("("):
+            continue
+
+        # CAST(value AS custom_type) uses an unadorned type name.
+        if re.search(r"\bAS\s*$", preceding, re.IGNORECASE):
+            continue
+
+        components = re.findall(_IDENTIFIER_COMPONENT, raw)
+        if not components:
+            continue
+
+        identifier = components[-1]
+        if identifier.startswith('"'):
+            identifier = identifier[1:-1].replace('""', '"')
+        else:
+            identifier = identifier.lower()
+
+        if (
+            not identifier
+            or identifier.lower() in _EXPRESSION_KEYWORDS
+            or identifier in seen
+        ):
+            continue
+
+        seen.add(identifier)
+        columns.append(identifier)
+
+    return columns
+
+
 def find_nodes(
     plan_node: dict,
 ) -> list[dict]:
@@ -72,6 +293,7 @@ def analyze_query_plan(
     # ----------------------------------------
 
     cardinality_error_ratio = None
+    cardinality_error_state = None
 
     if (
         estimated_output_rows > 0
@@ -84,6 +306,20 @@ def analyze_query_plan(
 
             actual_output_rows
             / estimated_output_rows,
+        )
+    elif (
+        estimated_output_rows == 0
+        and actual_output_rows > 0
+    ):
+        cardinality_error_state = (
+            "ZERO_ESTIMATE_WITH_ACTUAL_ROWS"
+        )
+    elif (
+        estimated_output_rows > 0
+        and actual_output_rows == 0
+    ):
+        cardinality_error_state = (
+            "ESTIMATED_ROWS_WITH_ZERO_ACTUAL"
         )
 
     result = {
@@ -109,6 +345,10 @@ def analyze_query_plan(
 
         "cardinality_error_ratio": (
             cardinality_error_ratio
+        ),
+
+        "cardinality_error_state": (
+            cardinality_error_state
         ),
 
         "scan_nodes": [],
@@ -195,17 +435,13 @@ def analyze_query_plan(
             )
         )
 
-        scan_name = (
-            node_type
-        )
+        scan_name = node_type
 
-        if (
-            node_type == "Seq Scan"
-            and parallel
-        ):
-
+        if node_type == "Seq Scan":
             scan_name = (
                 "Parallel Sequential Scan"
+                if parallel
+                else "Sequential Scan"
             )
 
         result[
@@ -224,6 +460,15 @@ def analyze_query_plan(
             "filter": (
                 node.get(
                     "Filter"
+                )
+            ),
+
+            # Policy code binds proposals to this structured set.  Keeping
+            # it separate from the rendered predicate prevents constants or
+            # type names from being mistaken for filtered columns.
+            "predicate_columns": (
+                extract_predicate_columns(
+                    node.get("Filter")
                 )
             ),
 
@@ -311,6 +556,32 @@ def detect_cardinality_anomalies(
             "cardinality_error_ratio"
         )
     )
+
+    error_state = analysis.get(
+        "cardinality_error_state"
+    )
+
+    if error_state is not None:
+        direction = (
+            "UNDER_ESTIMATE"
+            if error_state
+            == "ZERO_ESTIMATE_WITH_ACTUAL_ROWS"
+            else "OVER_ESTIMATE"
+        )
+
+        findings.append({
+            "type": (
+                "SEVERE_CARDINALITY_ERROR"
+            ),
+            "estimated_rows": estimated_rows,
+            "actual_rows": actual_rows,
+            "error_ratio": None,
+            "unbounded_error": True,
+            "direction": direction,
+            "state": error_state,
+            "threshold": threshold,
+        })
+        return findings
 
     if (
         estimated_rows is None

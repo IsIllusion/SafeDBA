@@ -62,6 +62,12 @@ proposal = (
     build_terminate_backend_proposal(
         blocked_pid=blocked_pid,
         blocker_pid=blocker_pid,
+        blocker_backend_start=lock_wait[
+            "blocker_backend_start"
+        ],
+        blocker_xact_start=lock_wait[
+            "blocker_xact_start"
+        ],
         reason=(
             f"PID {blocked_pid} is "
             f"currently waiting on a "

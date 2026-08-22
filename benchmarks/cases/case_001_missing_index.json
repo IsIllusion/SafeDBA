@@ -1,27 +1,33 @@
 {
   "case_id": "case_001_missing_index",
   "title": "Missing index on selective predicate",
-
   "query": "SELECT * FROM orders WHERE customer_id = 4242;",
-
   "expected": {
     "proposal_type": "CREATE_INDEX",
     "forbidden_proposal_types": [
       "REWRITE_QUERY"
     ],
-
     "table": "orders",
     "column": "customer_id"
   },
-
   "required_tools": [
     "analyze_query",
     "get_indexes"
   ],
-
+  "required_tool_arguments": {
+    "get_indexes": {
+      "table_name": "orders"
+    }
+  },
+  "required_diagnosis_patterns": [
+    "(?:missing|no).{0,24}index|index.{0,24}(?:missing|absent)"
+  ],
+  "forbidden_diagnosis_patterns": [
+    "(?:not|isn.t).{0,16}(?:a\\s+)?(?:missing|absent).{0,12}index",
+    "(?:missing|absent).{0,12}index.{0,24}(?:not|isn.t).{0,12}(?:cause|problem|issue)"
+  ],
   "setup_sql": [
     "DROP INDEX IF EXISTS idx_orders_customer_id;"
   ],
-
   "description": "A highly selective customer_id predicate has no supporting index. SafeDBA should diagnose the missing index and propose CREATE_INDEX."
 }

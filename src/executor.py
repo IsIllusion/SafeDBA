@@ -48,10 +48,25 @@ def now_utc() -> str:
         timezone.utc
     ).isoformat()
 
+
+def configured_incident_store():
+    """Build the only store trusted to authorize production execution."""
+    # Lazy imports keep the non-incident executor path dependency-light and
+    # make the store factory replaceable by deterministic tests.
+    from config import INCIDENT_STATE_DB_PATH
+    from workflow_store import SQLiteIncidentStore
+
+    return SQLiteIncidentStore(
+        INCIDENT_STATE_DB_PATH
+    )
+
+
+incident_store_factory = configured_incident_store
+
 def write_action_audit(
     result: dict,
-    proposal: dict,
-) -> None:
+    proposal: object,
+) -> bool:
 
     record = {
         "operation_id": (
@@ -66,6 +81,8 @@ def write_action_audit(
             proposal.get(
                 "type"
             )
+            if isinstance(proposal, dict)
+            else None
         ),
 
         "status": (
@@ -102,9 +119,24 @@ def write_action_audit(
         if key not in record:
             record[key] = value
 
-    write_audit_log(
-        record
-    )
+    try:
+        write_audit_log(
+            record
+        )
+    except Exception as exc:
+        result["audit"] = {
+            "status": "WRITE_FAILED",
+            "error_type": type(exc).__name__,
+        }
+        if result.get("status") == "SUCCESS":
+            result["status"] = "SUCCESS_AUDIT_FAILED"
+            result["decision"] = "REVIEW"
+        return False
+
+    result["audit"] = {
+        "status": "WRITTEN",
+    }
+    return True
 
 
 def find_table_scan(
@@ -162,6 +194,10 @@ def capture_query_state(
             )
         ),
         "scan": scan,
+        "scan_nodes": analysis.get(
+            "scan_nodes",
+            [],
+        ),
     }
 
 def capture_query_analysis(
@@ -211,11 +247,11 @@ def capture_statistics_state(
 
 def execute_query_rewrite_proposal(
     proposal: dict,
+    *,
+    operation_id: str | None = None,
 ) -> dict:
 
-    operation_id = str(
-        uuid.uuid4()
-    )
+    operation_id = operation_id or str(uuid.uuid4())
 
     # ----------------------------------
     # 1. Validate proposal structure
@@ -282,15 +318,15 @@ def execute_query_rewrite_proposal(
     ]
 
     # ----------------------------------
-    # 3. Semantic validation
+    # 3. Current-snapshot result comparison
     # ----------------------------------
 
     print()
     print(
-        "Running semantic validation..."
+        "Comparing current snapshot results..."
     )
 
-    semantic_result = (
+    snapshot_result = (
         compare_query_results(
             original_query,
             rewritten_query,
@@ -298,25 +334,25 @@ def execute_query_rewrite_proposal(
     )
 
     print(
-        "Equivalent:",
-        semantic_result[
+        "Current row multiset matches:",
+        snapshot_result[
             "equivalent"
         ],
     )
 
-    if not semantic_result[
+    if not snapshot_result[
         "equivalent"
     ]:
 
         result = {
             "operation_id": operation_id,
             "status": (
-                "BLOCKED_SEMANTICS"
+                "BLOCKED_SNAPSHOT_MISMATCH"
             ),
             "decision": "BLOCK",
             "risk": risk,
-            "semantic_validation": (
-                semantic_result
+            "snapshot_result_comparison": (
+                snapshot_result
             ),
         }
 
@@ -443,8 +479,8 @@ def execute_query_rewrite_proposal(
         "decision": decision,
         "risk": risk,
 
-        "semantic_validation": (
-            semantic_result
+        "snapshot_result_comparison": (
+            snapshot_result
         ),
 
         "before_ms": before_ms,
@@ -484,11 +520,11 @@ def execute_query_rewrite_proposal(
 
 def execute_analyze_table_proposal(
     proposal: dict,
+    *,
+    operation_id: str | None = None,
 ) -> dict:
 
-    operation_id = str(
-        uuid.uuid4()
-    )
+    operation_id = operation_id or str(uuid.uuid4())
 
     # ----------------------------------
     # 1. Validate proposal
@@ -817,11 +853,13 @@ def execute_analyze_table_proposal(
 
 def execute_terminate_backend_proposal(
     proposal: dict,
+    *,
+    operation_id: str | None = None,
+    approval_context: dict | None = None,
+    execution_context: dict | None = None,
 ) -> dict:
 
-    operation_id = str(
-        uuid.uuid4()
-    )
+    operation_id = operation_id or str(uuid.uuid4())
 
     # ----------------------------------
     # 1. Proposal validation
@@ -899,12 +937,119 @@ def execute_terminate_backend_proposal(
         )
     )
 
+    blocked_backend_start = (
+        before_evidence.get("blocked_backend_start")
+        if isinstance(before_evidence, dict)
+        else None
+    )
+    blocked_xact_start = (
+        before_evidence.get("blocked_xact_start")
+        if isinstance(before_evidence, dict)
+        else None
+    )
+    if (
+        not isinstance(blocked_backend_start, str)
+        or not blocked_backend_start.strip()
+        or not isinstance(blocked_xact_start, str)
+        or not blocked_xact_start.strip()
+    ):
+        result = {
+            "operation_id": operation_id,
+            "status": "BLOCKED_VALIDATION",
+            "decision": "BLOCK",
+            "errors": [
+                "Current blocked backend identity is incomplete."
+            ],
+            "before_evidence": before_evidence,
+        }
+        write_action_audit(
+            result,
+            proposal,
+        )
+        return result
+
     # ----------------------------------
     # 3. Human approval
     # ----------------------------------
 
-    if requires_approval(
-        risk
+    approval_source = None
+    incident_execution = (
+        approval_context is not None
+        or execution_context is not None
+    )
+    if incident_execution:
+        if (
+            not isinstance(approval_context, dict)
+            or not isinstance(execution_context, dict)
+        ):
+            result = {
+                "operation_id": operation_id,
+                "status": "BLOCKED_INCIDENT_APPROVAL",
+                "decision": "BLOCK",
+                "risk": risk,
+                "approved": False,
+                "errors": [
+                    "Persisted incident approval and execution context "
+                    "are both required."
+                ],
+                "before_evidence": before_evidence,
+            }
+            write_action_audit(
+                result,
+                proposal,
+            )
+            return result
+
+        try:
+            store = incident_store_factory()
+            authorization = store.claim_action_execution(
+                approval_context=approval_context,
+                operation_id=operation_id,
+                proposal=proposal,
+                current_evidence=before_evidence,
+                execution_context=execution_context,
+            )
+        except Exception as exc:
+            result = {
+                "operation_id": operation_id,
+                "status": "BLOCKED_INCIDENT_APPROVAL",
+                "decision": "BLOCK",
+                "risk": risk,
+                "approved": False,
+                "errors": [
+                    "The configured incident store did not authorize "
+                    "this action."
+                ],
+                "approval_error_type": type(exc).__name__,
+                "before_evidence": before_evidence,
+            }
+            write_action_audit(
+                result,
+                proposal,
+            )
+            return result
+
+        approval_source = {
+            "mode": "PERSISTED_INCIDENT_CLAIM",
+            "incident_id": authorization["incident_id"],
+            "approval_id": authorization["approval_id"],
+            "action_id": authorization["action_id"],
+            "operation_id": authorization["operation_id"],
+            "plan_revision": authorization["plan_revision"],
+            "scope_digest": authorization["scope_digest"],
+            "evidence_digest": authorization["evidence_digest"],
+            "claimed_at": authorization["claimed_at"],
+        }
+
+        print()
+        print(
+            "Using the persisted, exact-scope "
+            "IncidentWorkflow approval."
+        )
+
+    if (
+        requires_approval(risk)
+        and approval_source is None
     ):
 
         print()
@@ -1027,6 +1172,10 @@ def execute_terminate_backend_proposal(
 
             return result
 
+        approval_source = {
+            "mode": "INTERACTIVE_SINGLE_ACTION",
+        }
+
     # ----------------------------------
     # 4. FINAL revalidation + execute
     # ----------------------------------
@@ -1043,7 +1192,19 @@ def execute_terminate_backend_proposal(
             terminate_blocking_backend(
                 blocked_pid=blocked_pid,
                 blocker_pid=blocker_pid,
+                blocker_backend_start=proposal[
+                    "blocker_backend_start"
+                ],
+                blocker_xact_start=proposal[
+                    "blocker_xact_start"
+                ],
                 timeout_ms=5000,
+                blocked_backend_start=(
+                    blocked_backend_start
+                ),
+                blocked_xact_start=(
+                    blocked_xact_start
+                ),
             )
         )
 
@@ -1061,6 +1222,8 @@ def execute_terminate_backend_proposal(
             "risk": risk,
 
             "approved": True,
+
+            "approval_source": approval_source,
 
             "error": str(exc),
 
@@ -1094,6 +1257,8 @@ def execute_terminate_backend_proposal(
             "risk": risk,
 
             "approved": True,
+
+            "approval_source": approval_source,
 
             "before_evidence": (
                 before_evidence
@@ -1129,6 +1294,8 @@ def execute_terminate_backend_proposal(
             "risk": risk,
 
             "approved": True,
+
+            "approval_source": approval_source,
 
             "before_evidence": (
                 before_evidence
@@ -1222,6 +1389,8 @@ def execute_terminate_backend_proposal(
 
         "approved": True,
 
+        "approval_source": approval_source,
+
         "blocked_pid": (
             blocked_pid
         ),
@@ -1257,37 +1426,159 @@ def execute_terminate_backend_proposal(
 
 
 def execute_action_proposal(
-    proposal: dict,
+    proposal: object,
+    *,
+    operation_id: str | None = None,
+    approval_context: dict | None = None,
+    execution_context: dict | None = None,
 ) -> dict:
+
+    intent_id = operation_id or str(uuid.uuid4())
+    try:
+        uuid.UUID(intent_id)
+    except (ValueError, AttributeError, TypeError):
+        return {
+            "operation_id": intent_id,
+            "status": "BLOCKED_VALIDATION",
+            "decision": "BLOCK",
+            "errors": [
+                "operation_id must be a valid UUID."
+            ],
+        }
+    try:
+        write_audit_log({
+            "operation_id": intent_id,
+            "timestamp": now_utc(),
+            "action_type": (
+                proposal.get("type")
+                if isinstance(proposal, dict)
+                else None
+            ),
+            "status": "INTENT_RECEIVED",
+            "proposal": proposal,
+            "execution_context": execution_context,
+            "approval_context": (
+                {
+                    "kind": approval_context.get("kind"),
+                    "incident_id": approval_context.get("incident_id"),
+                    "approval_id": approval_context.get("approval_id"),
+                    "plan_revision": approval_context.get("plan_revision"),
+                    "scope_digest": approval_context.get("scope_digest"),
+                    "current_action_id": approval_context.get(
+                        "current_action_id"
+                    ),
+                }
+                if isinstance(approval_context, dict)
+                else None
+            ),
+        })
+    except Exception as exc:
+        return {
+            "operation_id": intent_id,
+            "status": "BLOCKED_AUDIT_UNAVAILABLE",
+            "decision": "BLOCK",
+            "error": (
+                "The append-only audit sink was unavailable; "
+                "no controlled action was attempted."
+            ),
+            "audit_error_type": type(exc).__name__,
+        }
+
+    try:
+        return _execute_action_proposal_with_intent(
+            proposal,
+            intent_id=intent_id,
+            approval_context=approval_context,
+            execution_context=execution_context,
+        )
+    except Exception as exc:
+        # The intent record proves an action may have begun.  Unexpected
+        # failures therefore require review rather than a misleading clean
+        # failure, and the outcome keeps the same correlation identifier.
+        result = {
+            "operation_id": intent_id,
+            "status": "FAILED_UNHANDLED",
+            "decision": "REVIEW",
+            "error": (
+                "Controlled action raised an unexpected exception; "
+                "database state may be incomplete."
+            ),
+            "error_type": type(exc).__name__,
+        }
+        write_action_audit(result, proposal)
+        return result
+
+
+def _execute_action_proposal_with_intent(
+    proposal: object,
+    *,
+    intent_id: str,
+    approval_context: dict | None = None,
+    execution_context: dict | None = None,
+) -> dict:
+
+    if not isinstance(proposal, dict):
+        result = {
+            "operation_id": intent_id,
+            "status": "BLOCKED_VALIDATION",
+            "decision": "BLOCK",
+            "errors": [
+                "Action proposal must be an object."
+            ],
+        }
+        write_action_audit(result, proposal)
+        return result
 
     action_type = proposal.get(
         "type"
     )
 
+    if (
+        (
+            approval_context is not None
+            or execution_context is not None
+        )
+        and action_type != "TERMINATE_BACKEND"
+    ):
+        result = {
+            "operation_id": intent_id,
+            "status": "BLOCKED_INCIDENT_APPROVAL",
+            "decision": "BLOCK",
+            "errors": [
+                "IncidentWorkflow approval currently supports "
+                "TERMINATE_BACKEND only."
+            ],
+        }
+        write_action_audit(result, proposal)
+        return result
+
     if action_type == "REWRITE_QUERY":
         return (
             execute_query_rewrite_proposal(
-                proposal
+                proposal,
+                operation_id=intent_id,
             )
         )
 
     if action_type == "ANALYZE_TABLE":
         return (
             execute_analyze_table_proposal(
-                proposal
+                proposal,
+                operation_id=intent_id,
             )
         )
 
     if action_type == "TERMINATE_BACKEND":
         return (
             execute_terminate_backend_proposal(
-                proposal
+                proposal,
+                operation_id=intent_id,
+                approval_context=approval_context,
+                execution_context=execution_context,
             )
         )
 
-    operation_id = str(
-        uuid.uuid4()
-    )
+    operation_id = intent_id
 
     # ----------------------------------------
     # 1. Deterministic validation
@@ -1443,7 +1734,7 @@ def execute_action_proposal(
 
     try:
 
-        create_index(
+        created_identity = create_index(
             table=proposal["table"],
             column=proposal["column"],
             index_name=proposal[
@@ -1457,6 +1748,7 @@ def execute_action_proposal(
             "operation_id": operation_id,
             "status": "FAILED",
             "risk": risk,
+            "approved": True,
             "error": str(exc),
         }
 
@@ -1475,19 +1767,76 @@ def execute_action_proposal(
         "Running AFTER benchmark..."
     )
 
-    after = benchmark_query(
-        proposal["query"]
-    )
+    try:
+        after = benchmark_query(
+            proposal["query"]
+        )
 
-    print(
-        f"After median: "
-        f"{after['median_ms']:.3f} ms"
-    )
+        print(
+            f"After median: "
+            f"{after['median_ms']:.3f} ms"
+        )
 
-    after_state = capture_query_state(
-        query=proposal["query"],
-        table=proposal["table"],
-    )
+        after_state = capture_query_state(
+            query=proposal["query"],
+            table=proposal["table"],
+        )
+
+    except Exception as verification_exc:
+        try:
+            drop_index(
+                proposal["index_name"],
+                expected_index_oid=(
+                    created_identity["index_oid"]
+                ),
+                expected_table_oid=(
+                    created_identity["table_oid"]
+                ),
+            )
+        except Exception as rollback_exc:
+            result = {
+                "operation_id": operation_id,
+                "status": "ROLLBACK_FAILED",
+                "decision": "REVIEW",
+                "risk": risk,
+                "approved": True,
+                "verification_error": (
+                    str(verification_exc)
+                ),
+                "rollback_error": (
+                    str(rollback_exc)
+                ),
+                "created_index_identity": (
+                    created_identity
+                ),
+                "before_state": before_state,
+            }
+            write_action_audit(
+                result,
+                proposal,
+            )
+            return result
+
+        result = {
+            "operation_id": operation_id,
+            "status": (
+                "ROLLED_BACK_AFTER_"
+                "VERIFICATION_ERROR"
+            ),
+            "decision": "ROLLBACK",
+            "risk": risk,
+            "approved": True,
+            "verification_error": (
+                str(verification_exc)
+            ),
+            "created_index_identity": created_identity,
+            "before_state": before_state,
+        }
+        write_action_audit(
+            result,
+            proposal,
+        )
+        return result
 
     before_ms = before[
         "median_ms"
@@ -1524,6 +1873,15 @@ def execute_action_proposal(
         != after_scan_type
     )
 
+    index_used = any(
+        scan.get("index_name")
+        == proposal["index_name"]
+        for scan in after_state.get(
+            "scan_nodes",
+            [],
+        )
+    )
+
 
     if before_ms > 0:
 
@@ -1548,6 +1906,7 @@ def execute_action_proposal(
     if (
         improvement
         < MIN_IMPROVEMENT_PCT
+        or not index_used
     ):
 
         try:
@@ -1555,7 +1914,13 @@ def execute_action_proposal(
             drop_index(
                 proposal[
                     "index_name"
-                ]
+                ],
+                expected_index_oid=(
+                    created_identity["index_oid"]
+                ),
+                expected_table_oid=(
+                    created_identity["table_oid"]
+                ),
             )
 
         except Exception as exc:
@@ -1568,6 +1933,7 @@ def execute_action_proposal(
                     "ROLLBACK_FAILED"
                 ),
                 "risk": risk,
+                "approved": True,
                 "before_ms": before_ms,
                 "after_ms": after_ms,
                 "improvement_pct": (
@@ -1576,6 +1942,8 @@ def execute_action_proposal(
                 "rollback_error": (
                     str(exc)
                 ),
+                "index_used": index_used,
+                "created_index_identity": created_identity,
             }
 
             write_action_audit(
@@ -1590,10 +1958,18 @@ def execute_action_proposal(
             "status": "ROLLED_BACK",
             "decision": "ROLLBACK",
             "risk": risk,
+            "approved": True,
 
             "before_ms": before_ms,
             "after_ms": after_ms,
             "improvement_pct": improvement,
+            "index_used": index_used,
+            "created_index_identity": created_identity,
+            "rollback_reason": (
+                "created_index_not_used"
+                if not index_used
+                else "insufficient_improvement"
+            ),
 
             "before_scan_type": (
                 before_scan_type
@@ -1629,10 +2005,13 @@ def execute_action_proposal(
         "status": "SUCCESS",
         "decision": "KEEP",
         "risk": risk,
+        "approved": True,
 
         "before_ms": before_ms,
         "after_ms": after_ms,
         "improvement_pct": improvement,
+        "index_used": index_used,
+        "created_index_identity": created_identity,
 
         "before_scan_type": (
             before_scan_type

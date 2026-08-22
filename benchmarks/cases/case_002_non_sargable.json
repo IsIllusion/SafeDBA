@@ -1,25 +1,36 @@
 {
   "case_id": "case_002_non_sargable",
   "title": "Non-sargable DATE predicate",
-
   "query": "SELECT * FROM orders WHERE DATE(created_at) = DATE '2026-05-18';",
-
   "expected": {
     "proposal_type": "REWRITE_QUERY",
     "forbidden_proposal_types": [
       "CREATE_INDEX"
     ]
   },
-
   "required_tools": [
     "analyze_query",
     "get_indexes",
     "get_column_info"
   ],
-
+  "required_tool_arguments": {
+    "get_indexes": {
+      "table_name": "orders"
+    },
+    "get_column_info": {
+      "table_name": "orders",
+      "column_name": "created_at"
+    }
+  },
+  "required_diagnosis_patterns": [
+    "non[- ]sargable|DATE\\s*\\(\\s*created_at"
+  ],
+  "forbidden_diagnosis_patterns": [
+    "(?:not|isn.t).{0,16}non[- ]sargable",
+    "DATE\\s*\\(\\s*created_at.{0,32}(?:not|isn.t).{0,12}(?:cause|problem|issue)"
+  ],
   "setup_sql": [
     "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);"
   ],
-
   "description": "An appropriate created_at index already exists, but DATE(created_at) makes the predicate non-sargable. SafeDBA should propose REWRITE_QUERY rather than another index."
 }

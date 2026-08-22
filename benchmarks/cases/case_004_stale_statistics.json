@@ -1,9 +1,7 @@
 {
   "case_id": "case_004_stale_statistics",
   "title": "Severe cardinality error from stale statistics",
-
   "query": "SELECT * FROM cardinality_test WHERE status = 'hot';",
-
   "expected": {
     "proposal_type": "ANALYZE_TABLE",
     "table": "cardinality_test",
@@ -15,12 +13,24 @@
       "REWRITE_QUERY"
     ]
   },
-
   "required_tools": [
     "analyze_query",
     "get_column_stats"
   ],
+  "required_tool_arguments": {
+    "get_column_stats": {
+      "table_name": "cardinality_test",
+      "column_name": "status"
+    }
+  },
+  "required_diagnosis_patterns": [
+    "stale statistics|cardinality (?:error|misestimation|under[- ]?estimat)|statistics.{0,30}(?:stale|out.of.date)"
+  ],
 
+  "forbidden_diagnosis_patterns": [
+    "(?:not|isn.t).{0,16}(?:stale statistics|cardinality (?:error|misestimation))",
+    "(?:stale statistics|cardinality (?:error|misestimation)).{0,24}(?:not|isn.t).{0,12}(?:cause|problem|issue)"
+  ],
   "setup_sql": [
     "DROP TABLE IF EXISTS cardinality_test;",
     "CREATE TABLE cardinality_test (id BIGINT PRIMARY KEY, status TEXT NOT NULL, payload TEXT) WITH (autovacuum_enabled = false);",
@@ -28,6 +38,5 @@
     "ANALYZE cardinality_test;",
     "UPDATE cardinality_test SET status = 'hot' WHERE id <= 50000;"
   ],
-
   "description": "Planner statistics describe status as 100% normal, but half the rows have changed to hot after ANALYZE. SafeDBA should diagnose stale statistics and propose ANALYZE_TABLE rather than an index or query rewrite."
 }
