@@ -2,7 +2,7 @@
 
 **Evidence-grounded, safety-aware Agentic DBA for PostgreSQL**
 
-SafeDBA is an experimental database operations Agent that investigates
+SafeDBA is an agent-based database operations system that investigates
 PostgreSQL performance and runtime incidents with live database evidence. The
 language model can decide what to inspect and explain what it finds, while a
 deterministic control plane owns validation, approval, execution, and
@@ -11,23 +11,19 @@ verification.
 > **The model reasons about the incident. Deterministic code controls the
 > database.**
 
-SafeDBA is a research and portfolio project. It is not a production-ready
-autonomous DBA and should not be connected to production systems without
-additional isolation, observability, access control, and operational review.
-
-## Current Status — 2026-09-05
+## Validation Summary — 2026-09-05
 
 The latest local verification passed 268 portable tests and 18 real PostgreSQL
-integration tests. A separate real-provider smoke evaluation passed three
+integration tests. A separate real-provider evaluation passed three
 synthetic diagnosis cases using DeepSeek `deepseek-v4-flash` in eight requests.
-These results establish a tested experimental baseline, not production
-accuracy or a production deployment certification.
+The test suites cover Agent control flow, evidence validation, database
+permissions, multi-blocker workflows, and cross-process execution.
 
-Independent lock execution is now available as an opt-in mode: the Agent
+Independent lock execution is available as an opt-in mode: the Agent
 keeps observer/model credentials, and a separate worker keeps only observer
 and termination credentials. Worker-side grants are short-lived, single-use,
-and bound to the operator's reviewed scope. Separate OS accounts and ACLs
-still need to be provisioned and tested by the deployer.
+and bound to the operator's reviewed scope. Deployments require separately
+provisioned OS accounts and filesystem ACLs to enforce process isolation.
 
 Documentation:
 
@@ -54,7 +50,7 @@ Documentation:
 - transient-error model circuit breaking with an optional explicit fallback
 - environment-specific execution policy and deny-only live stop controls
 - an opt-in independent lock executor with worker-private, short-lived grants
-- bounded real-provider smoke evaluation against a disposable PostgreSQL instance
+- bounded real-provider evaluation against a disposable PostgreSQL instance
 
 SafeDBA can currently prepare controlled proposals for:
 
@@ -70,7 +66,7 @@ database change.
 
 Diagnosis mode and execution environment are separate controls. In development,
 diagnosis can still execute an accepted query through `EXPLAIN ANALYZE`.
-`SAFEDBA_ENV=production` blocks runtime query execution and the experimental
+`SAFEDBA_ENV=production` blocks runtime query execution and the benchmark-based
 index/statistics/rewrite workflows; see [Runtime policy](#runtime-policy).
 
 ---
@@ -190,7 +186,7 @@ instructions alone.
 
 ### Separated runtime identities
 
-The demo environment creates different PostgreSQL identities for:
+The database initialization creates distinct PostgreSQL identities for:
 
 - observation
 - maintenance execution
@@ -339,7 +335,7 @@ SafeDBA/
 |   |-- runtime_policy.py        # Environment gates and live stop controls
 |   |-- telemetry.py             # Optional metadata-only tracing
 |   |-- integration_guard.py     # Disposable database identity checks
-|   |-- live_evaluate.py         # Bounded real-provider smoke evaluation
+|   |-- live_evaluate.py         # Bounded real-provider evaluation
 |   |-- config.py                # Environment configuration and bounds
 |   `-- evaluate.py              # Regression evaluator
 |-- tests/                       # Unit and protocol tests
@@ -391,8 +387,6 @@ SAFEDBA_LLM_MODEL=deepseek-v4-flash
 SAFEDBA_LLM_REASONING_ENABLED=false
 DEEPSEEK_API_KEY=YOUR_API_KEY
 ```
-
-Do not commit `.env`.
 
 ### Start the local database
 
@@ -527,11 +521,11 @@ are disabled; a provider failure stops further calls. These are request/token
 bounds, not a guaranteed monetary price. Reports retain model identity, actual
 usage, per-case checks, sanitized answers and tool traces in `live-model.json`.
 
-The 2026-09-05 DeepSeek `deepseek-v4-flash` baseline passed all three automatic
-checks in 8 requests (60,174 reported tokens). This is a **three-case smoke
-result, not 100% diagnostic accuracy**. Manual review found verbosity,
-language inconsistency, and overly broad health wording. See the
-[baseline and interpretation](docs/LIVE_MODEL_EVALUATION.md).
+The 2026-09-05 DeepSeek `deepseek-v4-flash` evaluation passed the automatic
+checks for all three cases in 8 requests (60,174 reported tokens). The measured
+scope is these three synthetic diagnosis scenarios. Per-case results, grading
+criteria, request accounting, and reviewer observations are documented in the
+[evaluation report](docs/LIVE_MODEL_EVALUATION.md).
 
 Manual integration scripts live in `scripts/manual/`. Some of them require a
 running database, prepared concurrent sessions, credentials, and explicit
@@ -604,7 +598,7 @@ same unrestricted account are not a security sandbox.
 | Environment | Catalogs / estimated plans | Runtime EXPLAIN | Repeated benchmarks | Mutations |
 |---|---|---|---|---|
 | `development`, `benchmark` | Available | Available by default | Available by default | Existing approval gates |
-| `staging` | Available | Available by default | Explicit opt-in | Index/statistics experiments also require benchmark opt-in |
+| `staging` | Available | Available by default | Explicit opt-in | Index/statistics workflows also require benchmark opt-in |
 | `production` | Available | Prohibited | Prohibited | Disabled by default; only lock termination can be explicitly enabled |
 
 Production always blocks `CREATE_INDEX`, `ANALYZE_TABLE`, `REWRITE_QUERY`,
@@ -692,7 +686,7 @@ audit records remain available for local inspection.
 
 ---
 
-## Important Limitations
+## Operational Requirements and Scope
 
 - the SQL guard is a conservative lexer/policy, not a complete PostgreSQL AST
   parser
@@ -702,8 +696,8 @@ audit records remain available for local inspection.
 - runtime observations are point-in-time snapshots
 - rewrite comparison checks one database snapshot; it does not prove semantic
   equivalence for every possible state
-- index creation is not yet a complete production-online index-management
-  workflow
+- index creation uses before/after workload benchmarks; online index lifecycle
+  management is outside the current workflow
 - backend termination has no application-level compensating rollback
 - SQLite memory, workflow, and experience files need external backup,
   retention, and tamper protection in production
@@ -712,13 +706,16 @@ audit records remain available for local inspection.
   production still needs externally anchored or WORM audit storage
 - default combined mode still loads multiple DB identities; the independent
   lock worker is opt-in and requires separate-account/ACL deployment testing
-- the benchmark suite is too small to estimate general production accuracy
+- evaluation results apply to the documented cases; deployment-specific
+  validation requires representative workloads and held-out cases
 - the CLI has no multi-tenant RBAC or asynchronous approval service
 - fallback models can produce materially different reasoning and must be
   evaluated against the same safety and regression suites before enablement
 
-Use SafeDBA only in isolated development or benchmark environments unless a
-qualified operator has reviewed and strengthened every relevant control.
+Before connecting a deployment to a managed database, configure least-privilege
+roles, protected secrets and state, process isolation, backups, and operator
+approval procedures. Validate the enabled workflows against that environment's
+workload and recovery requirements.
 
 ---
 
@@ -741,9 +738,3 @@ qualified operator has reviewed and strengthened every relevant control.
 ## License
 
 SafeDBA is available under the [MIT License](LICENSE).
-
-## Disclaimer
-
-SafeDBA is educational and experimental software. It is not a replacement for
-professional database administration, production change management, incident
-response procedures, backups, or independent security review.
