@@ -17,9 +17,24 @@ PROJECT_ROOT = (
 #
 # Existing operating-system environment
 # variables take precedence over .env.
-load_dotenv(
-    PROJECT_ROOT / ".env"
-)
+# Test/evaluation processes may explicitly ignore the user's local file.
+# Implement this here rather than relying on a particular dotenv version.
+PROCESS_ROLE = os.getenv("SAFEDBA_PROCESS_ROLE", "combined").strip().lower()
+if PROCESS_ROLE not in {"combined", "agent", "executor"}:
+    raise ValueError("SAFEDBA_PROCESS_ROLE must be combined, agent, or executor.")
+if PROCESS_ROLE == "agent" and any(
+    os.getenv(name) for name in (
+        "SAFEDBA_EXECUTOR_DB_PASSWORD", "SAFEDBA_TERMINATOR_DB_PASSWORD",
+        "PGPASSWORD", "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE",
+    )
+):
+    raise ValueError("Agent-only processes must not receive privileged database or ambient libpq credentials.")
+if PROCESS_ROLE == "executor" and any(
+    os.getenv(name) for name in ("SAFEDBA_LLM_API_KEY", "SAFEDBA_LLM_FALLBACK_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "SAFEDBA_EXECUTOR_DB_PASSWORD", "PGPASSWORD", "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE")
+):
+    raise ValueError("Lock executor processes must not receive model, maintenance, or ambient libpq credentials.")
+if os.getenv("SAFEDBA_SKIP_DOTENV") != "1" and PROCESS_ROLE == "combined":
+    load_dotenv(PROJECT_ROOT / ".env")
 
 
 def env_int(
@@ -117,7 +132,7 @@ EXECUTOR_DB_CONFIG = {
         "SAFEDBA_EXECUTOR_DB_USER",
         "safedba_executor",
     ),
-    "password": os.getenv(
+    "password": None if PROCESS_ROLE != "combined" else os.getenv(
         "SAFEDBA_EXECUTOR_DB_PASSWORD",
         "local-executor-only",
     ),
@@ -148,7 +163,7 @@ TERMINATOR_DB_CONFIG = {
         "SAFEDBA_TERMINATOR_DB_USER",
         "safedba_terminator",
     ),
-    "password": os.getenv(
+    "password": None if PROCESS_ROLE == "agent" else os.getenv(
         "SAFEDBA_TERMINATOR_DB_PASSWORD",
         "local-terminator-only",
     ),
@@ -157,6 +172,9 @@ TERMINATOR_DB_CONFIG = {
         DB_CONFIG["connect_timeout"],
     ),
 }
+
+if PROCESS_ROLE == "executor" and not os.getenv("SAFEDBA_TERMINATOR_DB_PASSWORD"):
+    raise ValueError("Executor profile requires explicit termination credentials, not maintenance credentials.")
 
 
 DB_STATEMENT_TIMEOUT_MS = env_int(
@@ -313,6 +331,46 @@ LLM_MAX_RETRIES = env_int(
 LLM_MAX_COMPLETION_TOKENS = env_int(
     "SAFEDBA_LLM_MAX_COMPLETION_TOKENS",
     2_500,
+)
+
+
+# Optional explicit fallback route. Credentials are never inherited from the
+# primary route so enabling failover cannot silently widen secret access.
+_fallback_provider_value = os.getenv(
+    "SAFEDBA_LLM_FALLBACK_PROVIDER",
+    "",
+).strip().lower()
+
+LLM_FALLBACK_PROVIDER = _fallback_provider_value or None
+
+LLM_FALLBACK_MODEL = os.getenv(
+    "SAFEDBA_LLM_FALLBACK_MODEL",
+    "",
+).strip()
+
+LLM_FALLBACK_BASE_URL = (
+    os.getenv("SAFEDBA_LLM_FALLBACK_BASE_URL", "").strip()
+    or None
+)
+
+LLM_FALLBACK_API_KEY = (
+    os.getenv("SAFEDBA_LLM_FALLBACK_API_KEY", "").strip()
+    or None
+)
+
+LLM_FALLBACK_REASONING_ENABLED = env_bool(
+    "SAFEDBA_LLM_FALLBACK_REASONING_ENABLED",
+    False,
+)
+
+LLM_CIRCUIT_FAILURE_THRESHOLD = env_int(
+    "SAFEDBA_LLM_CIRCUIT_FAILURE_THRESHOLD",
+    3,
+)
+
+LLM_CIRCUIT_COOLDOWN_SECONDS = env_float(
+    "SAFEDBA_LLM_CIRCUIT_COOLDOWN_SECONDS",
+    30.0,
 )
 
 
@@ -487,13 +545,56 @@ AUDIT_INCLUDE_QUERY_TEXT = env_bool(
 )
 
 
+# ----------------------------------------
+# OpenTelemetry
+# ----------------------------------------
+
+OTEL_ENABLED = env_bool(
+    "SAFEDBA_OTEL_ENABLED",
+    False,
+)
+
+OTEL_SERVICE_NAME = os.getenv(
+    "SAFEDBA_OTEL_SERVICE_NAME",
+    "safedba",
+).strip()
+
+OTEL_ENDPOINT = os.getenv(
+    "SAFEDBA_OTEL_ENDPOINT",
+    "http://127.0.0.1:4318/v1/traces",
+).strip()
+
+OTEL_EXPORT_TIMEOUT_SECONDS = env_float(
+    "SAFEDBA_OTEL_EXPORT_TIMEOUT_SECONDS",
+    5.0,
+)
+
+
 SAFEDBA_ENV = os.getenv(
     "SAFEDBA_ENV",
     "development",
 ).strip().lower()
 
+# Startup privilege ceiling. The live controls file can only remove rights.
+ENABLE_AGENT = env_bool("SAFEDBA_ENABLE_AGENT", True)
+ENABLE_MUTATIONS = env_bool("SAFEDBA_ENABLE_MUTATIONS", SAFEDBA_ENV != "production")
+ALLOW_RUNTIME_ANALYSIS = env_bool("SAFEDBA_ALLOW_RUNTIME_ANALYSIS", SAFEDBA_ENV != "production")
+ALLOW_BENCHMARK = env_bool("SAFEDBA_ALLOW_BENCHMARK", SAFEDBA_ENV in {"development", "benchmark"})
+ENABLE_CREATE_INDEX = env_bool("SAFEDBA_ENABLE_CREATE_INDEX", True)
+ENABLE_ANALYZE_TABLE = env_bool("SAFEDBA_ENABLE_ANALYZE_TABLE", True)
+ENABLE_TERMINATE_BACKEND = env_bool("SAFEDBA_ENABLE_TERMINATE_BACKEND", SAFEDBA_ENV != "production")
+ENABLE_REWRITE_QUERY = env_bool("SAFEDBA_ENABLE_REWRITE_QUERY", True)
+RUNTIME_CONTROLS_PATH = Path(os.getenv(
+    "SAFEDBA_RUNTIME_CONTROLS_PATH", str(PROJECT_ROOT / "logs" / "runtime_controls.json"),
+))
+if not RUNTIME_CONTROLS_PATH.is_absolute():
+    RUNTIME_CONTROLS_PATH = PROJECT_ROOT / RUNTIME_CONTROLS_PATH
+RUNTIME_CONTROLS_REQUIRED = env_bool("SAFEDBA_RUNTIME_CONTROLS_REQUIRED", False)
+
 
 def validate_settings() -> None:
+    if SAFEDBA_ENV not in {"development", "staging", "production", "benchmark"}:
+        raise ValueError("SAFEDBA_ENV must be development, staging, production, or benchmark.")
     positive_values = {
         "SAFEDBA_DB_CONNECT_TIMEOUT_SECONDS": (
             DB_CONFIG["connect_timeout"]
@@ -527,6 +628,12 @@ def validate_settings() -> None:
         ),
         "SAFEDBA_LLM_MAX_COMPLETION_TOKENS": (
             LLM_MAX_COMPLETION_TOKENS
+        ),
+        "SAFEDBA_LLM_CIRCUIT_FAILURE_THRESHOLD": (
+            LLM_CIRCUIT_FAILURE_THRESHOLD
+        ),
+        "SAFEDBA_LLM_CIRCUIT_COOLDOWN_SECONDS": (
+            LLM_CIRCUIT_COOLDOWN_SECONDS
         ),
         "SAFEDBA_AGENT_MAX_TOTAL_TOOL_CALLS": (
             AGENT_MAX_TOTAL_TOOL_CALLS
@@ -576,6 +683,9 @@ def validate_settings() -> None:
         "SAFEDBA_INCIDENT_DEADLINE_SECONDS": (
             INCIDENT_DEADLINE_SECONDS
         ),
+        "SAFEDBA_OTEL_EXPORT_TIMEOUT_SECONDS": (
+            OTEL_EXPORT_TIMEOUT_SECONDS
+        ),
     }
 
     invalid = [
@@ -602,6 +712,8 @@ def validate_settings() -> None:
         "SAFEDBA_DB_MAX_OBSERVED_QUERY_CHARS": 100_000,
         "SAFEDBA_LLM_TIMEOUT_SECONDS": 600,
         "SAFEDBA_LLM_MAX_COMPLETION_TOKENS": 100_000,
+        "SAFEDBA_LLM_CIRCUIT_FAILURE_THRESHOLD": 20,
+        "SAFEDBA_LLM_CIRCUIT_COOLDOWN_SECONDS": 3_600,
         "SAFEDBA_AGENT_MAX_TOTAL_TOOL_CALLS": 100,
         "SAFEDBA_AGENT_MAX_TOOL_CALLS_PER_TURN": 20,
         "SAFEDBA_AGENT_MAX_TOOL_OUTPUT_CHARS": 1_000_000,
@@ -618,6 +730,7 @@ def validate_settings() -> None:
         "SAFEDBA_INCIDENT_MAX_ACTIONS": 100,
         "SAFEDBA_INCIDENT_LEASE_SECONDS": 600,
         "SAFEDBA_INCIDENT_DEADLINE_SECONDS": 3_600,
+        "SAFEDBA_OTEL_EXPORT_TIMEOUT_SECONDS": 30,
     }
     excessive = [
         name
@@ -633,6 +746,18 @@ def validate_settings() -> None:
     if AGENT_MAX_TOOL_OUTPUT_CHARS < 256:
         raise ValueError(
             "SAFEDBA_AGENT_MAX_TOOL_OUTPUT_CHARS must be at least 256."
+        )
+
+    if not OTEL_SERVICE_NAME or len(OTEL_SERVICE_NAME) > 100:
+        raise ValueError(
+            "SAFEDBA_OTEL_SERVICE_NAME must contain 1 to 100 characters."
+        )
+    if (
+        not OTEL_ENDPOINT.startswith(("http://", "https://"))
+        or len(OTEL_ENDPOINT) > 2_048
+    ):
+        raise ValueError(
+            "SAFEDBA_OTEL_ENDPOINT must be an HTTP(S) endpoint."
         )
 
     runtime_users = {
@@ -654,6 +779,34 @@ def validate_settings() -> None:
         raise ValueError(
             "SAFEDBA_LLM_MAX_RETRIES exceeds the safety bound of 10."
         )
+
+    supported_llm_providers = {
+        "deepseek",
+        "openai_compatible",
+    }
+    if (
+        LLM_FALLBACK_PROVIDER is not None
+        and LLM_FALLBACK_PROVIDER not in supported_llm_providers
+    ):
+        raise ValueError(
+            "SAFEDBA_LLM_FALLBACK_PROVIDER is unsupported."
+        )
+    if LLM_FALLBACK_PROVIDER is not None:
+        missing_fallback = []
+        if not LLM_FALLBACK_MODEL:
+            missing_fallback.append("SAFEDBA_LLM_FALLBACK_MODEL")
+        if not LLM_FALLBACK_API_KEY:
+            missing_fallback.append("SAFEDBA_LLM_FALLBACK_API_KEY")
+        if (
+            LLM_FALLBACK_PROVIDER == "openai_compatible"
+            and not LLM_FALLBACK_BASE_URL
+        ):
+            missing_fallback.append("SAFEDBA_LLM_FALLBACK_BASE_URL")
+        if missing_fallback:
+            raise ValueError(
+                "Fallback provider configuration is incomplete: "
+                + ", ".join(missing_fallback)
+            )
 
     if MAX_ACCEPTABLE_CARDINALITY_ERROR_RATIO < 1:
         raise ValueError(

@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "get_column_stats",
     "get_lock_waits",
     "get_database_health",
+    "get_operational_snapshot",
     "get_active_sessions",
     "get_transaction_sessions",
     "diagnose_database",

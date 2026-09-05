@@ -249,6 +249,16 @@ class WorkflowStoreSecurityTests(unittest.TestCase):
             old_version + 1,
         )
 
+    def test_worker_grant_is_rechecked_inside_atomic_claim(self):
+        from execution_protocol import action_scope, digest
+        grant = {"scope_digest": digest(action_scope(self.ready, self.ready["actions"][0])), "expires_at": self.now.timestamp() + 10}
+        for invalid in ({**grant, "scope_digest": "0" * 64}, {**grant, "expires_at": self.now.timestamp()}, {**grant, "expires_at": float("nan")}):
+            with self.subTest(grant=invalid), self.assertRaises(IncidentApprovalUnavailable):
+                self.claim(execution_context=self.execution_context(isolated_grant=invalid))
+            self.assertEqual(self.store.load_incident(self.incident_id)["actions"][0]["state"], "EXECUTING")
+        self.claim(execution_context=self.execution_context(isolated_grant=grant))
+        self.assertEqual(self.store.load_incident(self.incident_id)["actions"][0]["state"], "APPLYING")
+
     def test_forged_approval_reference_is_rejected(self):
         reference = self.approval_reference()
         reference["approval_id"] = str(uuid.uuid4())

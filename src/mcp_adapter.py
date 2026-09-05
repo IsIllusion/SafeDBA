@@ -27,6 +27,7 @@ READ_ONLY_TOOL_ALLOWLIST = frozenset({
     "get_column_stats",
     "get_lock_waits",
     "get_database_health",
+    "get_operational_snapshot",
     "get_active_sessions",
     "get_transaction_sessions",
 })
@@ -211,6 +212,9 @@ class SafeDBAMCPFacade:
                 + "; ".join(validation_errors)
             )
 
+        from runtime_policy import require_tool
+        require_tool(name)
+
         # Re-attest immediately before every database observation.  This
         # catches role/configuration drift even for long-lived MCP processes.
         self._security_verifier()
@@ -232,6 +236,9 @@ class SafeDBAMCPFacade:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         """Run SafeDBA with action proposals deterministically disabled."""
+
+        from runtime_policy import require_operation
+        require_operation("AGENT_RUN")
 
         normalized_request = _non_empty_text(
             request,

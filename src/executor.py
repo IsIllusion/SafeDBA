@@ -1,6 +1,7 @@
 ﻿#This part is separated from Agent
 
 import uuid
+from runtime_policy import ACTION_TYPES, RuntimePolicyError, require_operation
 
 from datetime import (
     datetime,
@@ -1433,6 +1434,14 @@ def execute_action_proposal(
     execution_context: dict | None = None,
 ) -> dict:
 
+    import config as runtime_config
+    if getattr(runtime_config, "PROCESS_ROLE", "combined") == "agent":
+        from execution_client import execute_remote
+        return execute_remote(
+            proposal, operation_id=operation_id,
+            approval_context=approval_context, execution_context=execution_context,
+        )
+
     intent_id = operation_id or str(uuid.uuid4())
     try:
         uuid.UUID(intent_id)
@@ -1483,6 +1492,23 @@ def execute_action_proposal(
             ),
             "audit_error_type": type(exc).__name__,
         }
+
+    # This refusal precedes approval, benchmarking and any execution claim.
+    # Later failures must retain the uncertain-outcome handling below.
+    if isinstance(proposal, dict) and isinstance(proposal.get("type"), str) and proposal["type"] in ACTION_TYPES:
+        try:
+            require_operation(proposal["type"])
+        except RuntimePolicyError as exc:
+            result = {
+                "operation_id": intent_id,
+                "status": "BLOCKED_RUNTIME_POLICY",
+                "decision": "BLOCK",
+                "executed": False,
+                "error": str(exc),
+                "policy_reason": exc.reason,
+            }
+            write_action_audit(result, proposal)
+            return result
 
     try:
         return _execute_action_proposal_with_intent(

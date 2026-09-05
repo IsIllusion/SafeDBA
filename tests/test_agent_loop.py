@@ -1,4 +1,5 @@
 from collections import deque
+from contextlib import contextmanager
 import importlib.util
 import json
 import math
@@ -65,6 +66,18 @@ def _load_agent_module():
                 "blocker_pid": 2,
             }
         ],
+    )
+    db_tools.get_operational_snapshot = record(
+        "get_operational_snapshot",
+        {
+            "runtime_health": {"active_sessions": 0},
+            "connection_capacity": {
+                "max_connection_utilization_pct": 10.0,
+            },
+            "vacuum": {"tables": []},
+            "replication": {"server_role": "primary", "standbys": []},
+            "storage_usage": {"database_bytes": 1_000_000},
+        },
     )
     db_tools.get_query_plan = record(
         "get_query_plan",
@@ -152,6 +165,25 @@ def _load_agent_module():
     config.AGENT_MAX_TOTAL_TOOL_CALLS = 16
     config.AGENT_RUNTIME_EVIDENCE_TTL_SECONDS = 15.0
     stubs["config"] = config
+
+    telemetry = ModuleType("telemetry")
+
+    class NoopTelemetryRun:
+        trace_id = None
+
+        @contextmanager
+        def span(self, name, attributes=None):
+            yield None
+
+        def finish(self, **kwargs):
+            return None
+
+    class NoopTelemetryManager:
+        def start_run(self, **kwargs):
+            return NoopTelemetryRun()
+
+    telemetry.get_telemetry_manager = lambda: NoopTelemetryManager()
+    stubs["telemetry"] = telemetry
 
     previous = {
         name: sys.modules.get(name)
@@ -247,7 +279,133 @@ class FakeProvider:
         return serialized
 
 
+class CapturingTelemetryRun:
+    trace_id = "1234567890abcdef1234567890abcdef"
+
+    def __init__(self):
+        self.spans = []
+        self.finished = None
+
+    @contextmanager
+    def span(self, name, attributes=None):
+        self.spans.append((name, attributes or {}))
+        yield SimpleNamespace()
+
+    def finish(self, **kwargs):
+        self.finished = kwargs
+
+
+class CapturingTelemetryManager:
+    def __init__(self):
+        self.started = None
+        self.run = CapturingTelemetryRun()
+
+    def start_run(self, **kwargs):
+        self.started = kwargs
+        return self.run
+
+
 class AgentLoopTests(unittest.TestCase):
+
+    def test_model_trace_records_selected_fallback_without_secrets(self):
+        provider = FakeProvider([
+            response(content="Fallback diagnosis completed."),
+        ])
+        provider.model = "primary-model"
+        provider.last_call_metadata = {
+            "selected_provider": "fallback-provider",
+            "selected_model": "fallback-model",
+            "fallback_configured": True,
+            "fallback_used": True,
+            "failover_reason": "primary_transient_error",
+            "primary_error_type": "TimeoutError",
+            "primary_circuit_state": "closed",
+            "fallback_circuit_state": "closed",
+            "api_key": "must-not-leak",
+        }
+
+        result = AGENT.run_agent(
+            "Investigate without database evidence.",
+            provider=provider,
+        )
+
+        trace = result["model_trace"][0]
+        self.assertEqual(trace["model"], "fallback-model")
+        self.assertTrue(trace["provider_route"]["fallback_used"])
+        self.assertNotIn("api_key", trace["provider_route"])
+
+    def test_general_incident_can_collect_broad_snapshot_in_one_tool_call(self):
+        provider = FakeProvider([
+            response(
+                calls=[
+                    tool_call(
+                        "snapshot-1",
+                        "get_operational_snapshot",
+                        {},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            response(
+                content="Operational evidence collected [ev-0001]."
+            ),
+        ])
+
+        result = AGENT.run_agent(
+            "Investigate general database degradation.",
+            provider=provider,
+        )
+
+        snapshot_calls = [
+            call
+            for call in CALLS
+            if call[0] == "get_operational_snapshot"
+        ]
+        self.assertEqual(len(snapshot_calls), 1)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["usage"]["tool_calls_attempted"], 1)
+        self.assertIn(
+            "get_operational_snapshot",
+            provider.tool_sets[0],
+        )
+
+    def test_agent_emits_correlated_telemetry_without_payloads(self):
+        telemetry = CapturingTelemetryManager()
+        provider = FakeProvider([
+            response(calls=[
+                tool_call(
+                    "health-1",
+                    "get_database_health",
+                    {},
+                ),
+            ], finish_reason="tool_calls"),
+            response(
+                content="Database health was observed [ev-0001]."
+            ),
+        ])
+
+        result = AGENT.run_agent(
+            "Sensitive user prompt that must not enter telemetry.",
+            provider=provider,
+            capture_experience=False,
+            telemetry_manager=telemetry,
+        )
+
+        self.assertEqual(telemetry.run.trace_id, result["trace_id"])
+        self.assertEqual("completed", telemetry.run.finished["status"])
+        self.assertEqual(
+            [
+                "safedba.runtime_security.verify",
+                "safedba.llm.complete",
+                "safedba.tool.call",
+                "safedba.llm.complete",
+            ],
+            [name for name, _ in telemetry.run.spans],
+        )
+        self.assertNotIn(
+            "Sensitive user prompt",
+            repr(telemetry.run.spans),
+        )
 
     def test_model_trace_and_token_usage_are_structured(self):
         provider = FakeProvider([

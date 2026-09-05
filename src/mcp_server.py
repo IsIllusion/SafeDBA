@@ -184,6 +184,21 @@ def create_mcp_server(
         )
 
     @server.tool(
+        name="get_operational_snapshot",
+        description=(
+            "Collect broad read-only PostgreSQL evidence for connection "
+            "capacity, VACUUM pressure, replication, runtime health, and "
+            "PostgreSQL-visible storage usage."
+        ),
+        annotations=metadata_read,
+        structured_output=True,
+    )
+    def get_operational_snapshot() -> dict[str, Any]:
+        return api.call_database_tool(
+            "get_operational_snapshot"
+        )
+
+    @server.tool(
         name="get_active_sessions",
         description=(
             "Inspect active PostgreSQL client sessions without cancelling or "

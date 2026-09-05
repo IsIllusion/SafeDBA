@@ -1097,6 +1097,23 @@ class SQLiteIncidentStore:
                 approved_waiters = _json_load(
                     row["approved_waiters_json"]
                 )
+                # The worker injects this deny-only check from its private
+                # grant database, never from the HTTP caller. Recheck while
+                # holding the write lock: Agent state may have changed since
+                # the separate operator grant was claimed.
+                isolated_grant = execution_context.get("isolated_grant")
+                if isolated_grant is not None:
+                    from execution_protocol import action_scope, digest
+                    expiry = isolated_grant.get("expires_at") if isinstance(isolated_grant, dict) else None
+                    scope = action_scope(
+                        {"incident_id": incident_id, "plan_revision": row["incident_plan_revision"]},
+                        {"action_id": action_id, "proposal": persisted_proposal, "target": target,
+                         "approved_waiters": approved_waiters, "allowed_blocked_pids": allowed_blocked_pids},
+                    )
+                    if (type(expiry) not in (int, float) or not math.isfinite(expiry)
+                            or current_utc.timestamp() >= expiry
+                            or isolated_grant.get("scope_digest") != digest(scope)):
+                        raise IncidentApprovalUnavailable("Worker-side grant expired or action scope changed before execution claim.")
                 if (
                     not isinstance(allowed_blocked_pids, list)
                     or not isinstance(approved_waiters, list)

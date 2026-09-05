@@ -129,6 +129,33 @@ class MainIncidentWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(self.executor_calls, [])
 
+    def test_verify_audit_chain_prints_valid_result(self):
+        audit = ModuleType("audit")
+        audit.verify_audit_log = lambda: {
+            "valid": True,
+            "records": 2,
+        }
+        with patch.dict(sys.modules, {"audit": audit}):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = MAIN.verify_audit_chain()
+
+        self.assertTrue(result["valid"])
+        self.assertIn('"records": 2', output.getvalue())
+
+    def test_verify_audit_chain_exits_nonzero_on_integrity_failure(self):
+        audit = ModuleType("audit")
+        audit.verify_audit_log = lambda: {
+            "valid": False,
+            "error": {"type": "AUDIT_RECORD_HASH_MISMATCH"},
+        }
+        with patch.dict(sys.modules, {"audit": audit}):
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    MAIN.verify_audit_chain()
+
+        self.assertEqual(raised.exception.code, 2)
+
     def test_explicit_lock_workflow_expands_from_one_agent_proposal(self):
         proposal = terminate_proposal(101, 201)
         MAIN.run_agent = lambda message, mode: {

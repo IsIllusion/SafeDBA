@@ -484,6 +484,16 @@ def list_incidents() -> None:
     )
 
 
+def verify_audit_chain() -> dict:
+    from audit import verify_audit_log
+
+    result = verify_audit_log()
+    print_json(result)
+    if not result["valid"]:
+        raise SystemExit(2)
+    return result
+
+
 def interactive_mode() -> None:
 
     thread_id = "safedba-cli"
@@ -769,6 +779,13 @@ def main() -> None:
 
         arguments = list(sys.argv[1:])
 
+        if arguments[0] == "--runtime-policy":
+            if len(arguments) != 1:
+                raise SystemExit("--runtime-policy does not accept additional arguments.")
+            from runtime_policy import get_runtime_policy
+            print_json(get_runtime_policy())
+            return
+
         if arguments[0] == "--resume":
             if len(arguments) != 2:
                 raise SystemExit(
@@ -785,6 +802,14 @@ def main() -> None:
                     "--incidents does not accept additional arguments."
                 )
             list_incidents()
+            return
+
+        if arguments[0] == "--verify-audit":
+            if len(arguments) != 1:
+                raise SystemExit(
+                    "--verify-audit does not accept additional arguments."
+                )
+            verify_audit_chain()
             return
 
         session_id = None

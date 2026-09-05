@@ -125,7 +125,9 @@ class LockEnvironment:
         self.return_none_on_call = None
         self.raise_on_call = None
         self.return_success_without_claim_on_call = None
+        self.return_policy_blocked_on_call = None
         self.return_blocked_after_claim_on_call = None
+        self.blocked_status = "BLOCKED_INCIDENT_APPROVAL"
         self.remove_representative_only = False
         self.inject_after_call = {}
         self.observe_calls = 0
@@ -160,6 +162,15 @@ class LockEnvironment:
             approval_context["approval_id"]
         )
         call_number = len(self.execute_calls)
+
+        if self.return_policy_blocked_on_call == call_number:
+            return {
+                "operation_id": operation_id,
+                "status": "BLOCKED_RUNTIME_POLICY",
+                "executed": False,
+                "policy_reason": "action_disabled",
+                "audit": {"status": "WRITTEN"},
+            }
 
         if (
             self.crash_on_call == call_number
@@ -203,7 +214,7 @@ class LockEnvironment:
         if self.return_blocked_after_claim_on_call == call_number:
             return {
                 "operation_id": operation_id,
-                "status": "BLOCKED_INCIDENT_APPROVAL",
+                "status": self.blocked_status,
                 "blocking_relationship_removed": False,
                 "approval_error_type": "LateExecutorError",
                 "audit": {"status": "WRITTEN"},
@@ -360,6 +371,40 @@ class CrashAfterEventStore(SQLiteIncidentStore):
 
 
 class IncidentWorkflowTests(unittest.TestCase):
+    def test_policy_block_before_claim_preserves_pending_actions_and_requires_reapproval(self):
+        rows = [lock_row(101, 201), lock_row(102, 202), lock_row(103, 203)]
+        environment = LockEnvironment(rows)
+        environment.return_policy_blocked_on_call = 2
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            incident = self.create(store, environment, [proposal(rows[0])], expand=True)
+            result, approvals = self.run_workflow(store, environment, incident)
+            self.assertEqual(result["state"], "AWAITING_REAPPROVAL")
+            self.assertEqual(len(environment.execute_calls), 2)
+            self.assertEqual(len(approvals), 1)
+            self.assertEqual([action["state"] for action in result["actions"]], ["SUCCEEDED", "PLANNED", "PLANNED"])
+            self.assertEqual(result["actions"][1]["last_error"]["policy_reason"], "action_disabled")
+
+            # Releasing a switch does not grant approval for the rest of the
+            # batch. Explicit resume asks again, without repeating step 1.
+            environment.return_policy_blocked_on_call = None
+            resumed, new_approvals = self.run_workflow(store, environment, result)
+            self.assertEqual(resumed["state"], "COMPLETED")
+            self.assertEqual(len(new_approvals), 1)
+            self.assertEqual(len(environment.execute_calls), 4)
+
+    def test_policy_block_after_claim_cannot_be_treated_as_safe_to_retry(self):
+        row = lock_row(101, 201)
+        environment = LockEnvironment([row])
+        environment.return_blocked_after_claim_on_call = 1
+        environment.blocked_status = "BLOCKED_RUNTIME_POLICY"
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            incident = self.create(store, environment, [proposal(row)])
+            result, _ = self.run_workflow(store, environment, incident)
+            self.assertEqual(result["state"], "REVIEW_REQUIRED")
+            self.assertNotEqual(result["actions"][0]["state"], "PLANNED")
+
     def make_store(self, directory, *, clock=None):
         return SQLiteIncidentStore(
             Path(directory) / "incidents.sqlite3",

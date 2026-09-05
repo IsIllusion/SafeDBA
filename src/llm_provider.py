@@ -1,10 +1,27 @@
 ﻿from typing import Any
 
-from openai import OpenAI
+from threading import Lock, local
+import time
+
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
 
 from config import (
     LLM_API_KEY,
     LLM_BASE_URL,
+    LLM_CIRCUIT_COOLDOWN_SECONDS,
+    LLM_CIRCUIT_FAILURE_THRESHOLD,
+    LLM_FALLBACK_API_KEY,
+    LLM_FALLBACK_BASE_URL,
+    LLM_FALLBACK_MODEL,
+    LLM_FALLBACK_PROVIDER,
+    LLM_FALLBACK_REASONING_ENABLED,
     LLM_MAX_COMPLETION_TOKENS,
     LLM_MAX_RETRIES,
     LLM_MODEL,
@@ -283,11 +300,288 @@ class OpenAICompatibleProvider:
         return message_dict
 
 
+class ProviderCircuitOpenError(RuntimeError):
+    """Raised when a provider is temporarily unavailable by policy."""
+
+
+class ProviderFallbackError(RuntimeError):
+    """Raised when an explicitly configured fallback also cannot respond."""
+
+
+def is_transient_provider_error(exc: Exception) -> bool:
+    """Return whether an error is safe to route around automatically."""
+
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            ConnectionError,
+            APIConnectionError,
+            APITimeoutError,
+            RateLimitError,
+            InternalServerError,
+        ),
+    ):
+        return True
+
+    if isinstance(exc, APIStatusError):
+        status_code = getattr(exc, "status_code", None)
+        return (
+            status_code in {408, 429}
+            or (
+                isinstance(status_code, int)
+                and status_code >= 500
+            )
+        )
+
+    return False
+
+
+class _ProviderCircuit:
+    def __init__(
+        self,
+        *,
+        failure_threshold: int,
+        cooldown_seconds: float,
+        clock,
+    ) -> None:
+        self._failure_threshold = failure_threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._lock = Lock()
+        self._consecutive_failures = 0
+        self._opened_at: float | None = None
+        self._half_open_in_flight = False
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            if self._opened_at is None:
+                return True
+            if (
+                self._clock() - self._opened_at
+                < self._cooldown_seconds
+            ):
+                return False
+            if self._half_open_in_flight:
+                return False
+            self._half_open_in_flight = True
+            return True
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+            self._opened_at = None
+            self._half_open_in_flight = False
+
+    def record_non_transient_response(self) -> None:
+        # A deterministic 4xx or local request error is not an outage. It
+        # propagates, but proves a prior transient outage is no longer a
+        # reason to keep the circuit open.
+        self.record_success()
+
+    def record_transient_failure(self) -> None:
+        with self._lock:
+            self._consecutive_failures += 1
+            if (
+                self._half_open_in_flight
+                or self._consecutive_failures
+                >= self._failure_threshold
+            ):
+                self._opened_at = self._clock()
+            self._half_open_in_flight = False
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            if self._opened_at is None:
+                return "closed"
+            if (
+                self._clock() - self._opened_at
+                >= self._cooldown_seconds
+            ):
+                return "half_open"
+            return "open"
+
+
+class ResilientProvider:
+    """Explicit transient-error failover with per-route circuit breakers."""
+
+    def __init__(
+        self,
+        primary,
+        fallback=None,
+        *,
+        failure_threshold: int = 3,
+        cooldown_seconds: float = 30.0,
+        clock=time.monotonic,
+    ) -> None:
+        if failure_threshold <= 0:
+            raise ValueError("failure_threshold must be positive.")
+        if cooldown_seconds <= 0:
+            raise ValueError("cooldown_seconds must be positive.")
+        self.primary = primary
+        self.fallback = fallback
+        self.model = primary.model
+        self.provider_name = primary.provider_name
+        self._primary_circuit = _ProviderCircuit(
+            failure_threshold=failure_threshold,
+            cooldown_seconds=cooldown_seconds,
+            clock=clock,
+        )
+        self._fallback_circuit = (
+            _ProviderCircuit(
+                failure_threshold=failure_threshold,
+                cooldown_seconds=cooldown_seconds,
+                clock=clock,
+            )
+            if fallback is not None
+            else None
+        )
+        self._call_state = local()
+
+    @property
+    def last_call_metadata(self) -> dict:
+        return dict(
+            getattr(self._call_state, "metadata", {})
+        )
+
+    def _save_metadata(self, metadata: dict) -> None:
+        metadata["primary_circuit_state"] = (
+            self._primary_circuit.state
+        )
+        metadata["fallback_circuit_state"] = (
+            self._fallback_circuit.state
+            if self._fallback_circuit is not None
+            else "not_configured"
+        )
+        self._call_state.metadata = dict(metadata)
+
+    @staticmethod
+    def _route_identity(provider) -> dict:
+        return {
+            "selected_provider": getattr(
+                provider,
+                "provider_name",
+                None,
+            ),
+            "selected_model": getattr(provider, "model", None),
+        }
+
+    def _call_fallback(
+        self,
+        metadata: dict,
+        *,
+        messages: list,
+        tools: list | None,
+        tool_choice: str | None,
+    ):
+        if (
+            self.fallback is None
+            or self._fallback_circuit is None
+        ):
+            self._save_metadata(metadata)
+            raise ProviderCircuitOpenError(
+                "Primary provider circuit is open and no fallback is "
+                "configured."
+            )
+        metadata["fallback_used"] = True
+        if not self._fallback_circuit.try_acquire():
+            metadata["fallback_error_type"] = (
+                "ProviderCircuitOpenError"
+            )
+            self._save_metadata(metadata)
+            raise ProviderFallbackError(
+                "The configured fallback provider circuit is open."
+            )
+
+        try:
+            response = self.fallback.complete(
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        except Exception as exc:
+            metadata["fallback_error_type"] = type(exc).__name__
+            if is_transient_provider_error(exc):
+                self._fallback_circuit.record_transient_failure()
+            else:
+                self._fallback_circuit.record_non_transient_response()
+            self._save_metadata(metadata)
+            raise ProviderFallbackError(
+                "Primary and fallback provider routes both failed."
+            ) from exc
+
+        self._fallback_circuit.record_success()
+        metadata.update(self._route_identity(self.fallback))
+        self._save_metadata(metadata)
+        return response
+
+    def complete(
+        self,
+        *,
+        messages: list,
+        tools: list | None = None,
+        tool_choice: str | None = None,
+    ):
+        metadata = {
+            "fallback_configured": self.fallback is not None,
+            "fallback_used": False,
+        }
+
+        if not self._primary_circuit.try_acquire():
+            metadata["failover_reason"] = "primary_circuit_open"
+            metadata["primary_error_type"] = (
+                "ProviderCircuitOpenError"
+            )
+            return self._call_fallback(
+                metadata,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+
+        try:
+            response = self.primary.complete(
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        except Exception as exc:
+            metadata["primary_error_type"] = type(exc).__name__
+            if not is_transient_provider_error(exc):
+                self._primary_circuit.record_non_transient_response()
+                self._save_metadata(metadata)
+                raise
+
+            self._primary_circuit.record_transient_failure()
+            metadata["failover_reason"] = "primary_transient_error"
+            if self.fallback is None:
+                self._save_metadata(metadata)
+                raise
+            return self._call_fallback(
+                metadata,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+
+        self._primary_circuit.record_success()
+        metadata.update(self._route_identity(self.primary))
+        self._save_metadata(metadata)
+        return response
+
+    @staticmethod
+    def assistant_message_to_dict(message: Any) -> dict:
+        return OpenAICompatibleProvider.assistant_message_to_dict(
+            message
+        )
+
+
 _provider = None
 
 
 def get_llm_provider(
-) -> OpenAICompatibleProvider:
+) -> ResilientProvider:
     """
     Lazily construct the configured provider.
 
@@ -310,28 +604,45 @@ def get_llm_provider(
                 f"{LLM_PROVIDER}"
             )
 
-        _provider = (
-            OpenAICompatibleProvider(
-                provider_name=LLM_PROVIDER,
-                api_key=LLM_API_KEY,
-                model=LLM_MODEL,
-                base_url=LLM_BASE_URL,
+        primary = OpenAICompatibleProvider(
+            provider_name=LLM_PROVIDER,
+            api_key=LLM_API_KEY,
+            model=LLM_MODEL,
+            base_url=LLM_BASE_URL,
+            reasoning_enabled=LLM_REASONING_ENABLED,
+            reasoning_effort=LLM_REASONING_EFFORT,
+            timeout_seconds=LLM_TIMEOUT_SECONDS,
+            max_retries=LLM_MAX_RETRIES,
+            max_completion_tokens=LLM_MAX_COMPLETION_TOKENS,
+        )
+
+        fallback = None
+        if LLM_FALLBACK_PROVIDER is not None:
+            fallback = OpenAICompatibleProvider(
+                provider_name=LLM_FALLBACK_PROVIDER,
+                api_key=LLM_FALLBACK_API_KEY,
+                model=LLM_FALLBACK_MODEL,
+                base_url=LLM_FALLBACK_BASE_URL,
                 reasoning_enabled=(
-                    LLM_REASONING_ENABLED
+                    LLM_FALLBACK_REASONING_ENABLED
                 ),
-                reasoning_effort=(
-                    LLM_REASONING_EFFORT
-                ),
-                timeout_seconds=(
-                    LLM_TIMEOUT_SECONDS
-                ),
-                max_retries=(
-                    LLM_MAX_RETRIES
-                ),
+                reasoning_effort=LLM_REASONING_EFFORT,
+                timeout_seconds=LLM_TIMEOUT_SECONDS,
+                max_retries=LLM_MAX_RETRIES,
                 max_completion_tokens=(
                     LLM_MAX_COMPLETION_TOKENS
                 ),
             )
+
+        _provider = ResilientProvider(
+            primary,
+            fallback,
+            failure_threshold=(
+                LLM_CIRCUIT_FAILURE_THRESHOLD
+            ),
+            cooldown_seconds=(
+                LLM_CIRCUIT_COOLDOWN_SECONDS
+            ),
         )
 
     return _provider

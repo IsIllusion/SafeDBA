@@ -1,0 +1,106 @@
+name: SafeDBA CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  postgres-integration:
+    name: PostgreSQL ${{ matrix.postgres-version }} integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["16", "18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_USER: safedba_bootstrap
+          POSTGRES_PASSWORD: local-bootstrap-only
+          POSTGRES_DB: benchmark
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U safedba_bootstrap -d benchmark"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SAFEDBA_RUN_POSTGRES_INTEGRATION: "1"
+      SAFEDBA_ENV: benchmark
+      SAFEDBA_SKIP_DOTENV: "1"
+      SAFEDBA_AGENT_MEMORY_ENABLED: "false"
+      SAFEDBA_EXPERIENCE_CAPTURE_ENABLED: "false"
+      SAFEDBA_LLM_PROVIDER: openai_compatible
+      SAFEDBA_LLM_BASE_URL: http://127.0.0.1:1/v1
+      SAFEDBA_LLM_API_KEY: ci-do-not-call
+      SAFEDBA_LLM_MODEL: scripted-integration-only
+      SAFEDBA_DB_HOST: 127.0.0.1
+      SAFEDBA_DB_PORT: "5432"
+      SAFEDBA_DB_NAME: benchmark
+      SAFEDBA_DB_USER: safedba_observer
+      SAFEDBA_DB_PASSWORD: local-observer-only
+      SAFEDBA_EXECUTOR_DB_HOST: 127.0.0.1
+      SAFEDBA_EXECUTOR_DB_PORT: "5432"
+      SAFEDBA_EXECUTOR_DB_NAME: benchmark
+      SAFEDBA_EXECUTOR_DB_USER: safedba_executor
+      SAFEDBA_EXECUTOR_DB_PASSWORD: local-executor-only
+      SAFEDBA_TERMINATOR_DB_HOST: 127.0.0.1
+      SAFEDBA_TERMINATOR_DB_PORT: "5432"
+      SAFEDBA_TERMINATOR_DB_NAME: benchmark
+      SAFEDBA_TERMINATOR_DB_USER: safedba_terminator
+      SAFEDBA_TERMINATOR_DB_PASSWORD: local-terminator-only
+      SAFEDBA_OTEL_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt
+      - name: Create lightweight integration fixture
+        env:
+          PGPASSWORD: local-bootstrap-only
+        run: >-
+          psql -h 127.0.0.1 -U safedba_bootstrap -d benchmark
+          -v ON_ERROR_STOP=1 -f tests/fixtures/postgres_integration.sql
+      - name: Bind tests to the fresh fixture instance
+        env:
+          PGPASSWORD: local-bootstrap-only
+        run: |
+          instance_id=$(psql -h 127.0.0.1 -U safedba_bootstrap -d benchmark -Atc "SELECT instance_id FROM safedba_test_control.instance")
+          echo "SAFEDBA_TEST_INSTANCE_ID=$instance_id" >> "$GITHUB_ENV"
+      - run: python tests/integration/run_suite.py --report integration-report.json
+      - name: Retain integration results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-${{ matrix.postgres-version }}-integration
+          path: integration-report.json
+          if-no-files-found: warn

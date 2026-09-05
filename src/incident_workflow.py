@@ -32,6 +32,7 @@ from workflow_store import (
     IncidentLeaseUnavailable,
     SQLiteIncidentStore,
 )
+from telemetry import get_telemetry_manager
 
 
 WORKFLOW_TYPE = "LOCK_CONTENTION"
@@ -801,6 +802,44 @@ def _executor_result_confirmed(
     )
 
 
+def _observe_lock_graph(
+    observe_locks: Callable[[], dict],
+    *,
+    telemetry_run,
+    phase: str,
+) -> dict:
+    """Observe locks while exporting only bounded structural metadata."""
+
+    with telemetry_run.span(
+        "safedba.incident.observe",
+        {"safedba.workflow.phase": phase},
+    ) as span:
+        snapshot = observe_locks()
+        if isinstance(snapshot, dict):
+            rows = snapshot.get("rows")
+            if isinstance(rows, list):
+                span.set_attribute(
+                    "safedba.observation.row_count",
+                    len(rows),
+                )
+            span.set_attribute(
+                "safedba.observation.complete",
+                snapshot.get("truncated") is False,
+            )
+        return snapshot
+
+
+def _telemetry_action_status(value: object) -> str:
+    if (
+        isinstance(value, str)
+        and 1 <= len(value) <= 64
+        and value == value.upper()
+        and all(character.isalnum() or character == "_" for character in value)
+    ):
+        return value
+    return "UNRECOGNIZED"
+
+
 def _reconcile_inflight(
     incident: dict,
     *,
@@ -977,6 +1016,7 @@ def _run_lock_incident_once(
     execute_action: Callable[..., dict] = execute_action_proposal,
     approval_decider: Callable[[dict], object] | None = None,
     now: Callable[[], datetime] = utc_now,
+    telemetry_run=None,
 ) -> dict:
     incident_store = store or SQLiteIncidentStore()
     incident = incident_store.load_incident(
@@ -999,9 +1039,25 @@ def _run_lock_incident_once(
         prompted_actions_digest = _sha256(
             canonical_approved_actions(incident["actions"])
         )
-        decision = approval_decider(
-            deepcopy(incident)
-        )
+        with telemetry_run.span(
+            "safedba.incident.approval",
+            {
+                "safedba.workflow.reapproval": (
+                    incident["state"] == "AWAITING_REAPPROVAL"
+                ),
+                "safedba.workflow.action_count": len(
+                    incident["actions"]
+                ),
+            },
+        ) as approval_span:
+            decision = approval_decider(
+                deepcopy(incident)
+            )
+            approved, _ = _decision_value(decision)
+            approval_span.set_attribute(
+                "safedba.approval.approved",
+                approved,
+            )
 
     worker_id = str(uuid.uuid4())
     current = now()
@@ -1073,7 +1129,11 @@ def _run_lock_incident_once(
             now=current,
             lease_seconds=incident["policy"]["lease_seconds"],
         )
-        initial_snapshot = observe_locks()
+        initial_snapshot = _observe_lock_graph(
+            observe_locks,
+            telemetry_run=telemetry_run,
+            phase="reconciliation",
+        )
         if initial_snapshot.get("truncated") is not False:
             incident["state"] = "REVIEW_REQUIRED"
             incident["last_error"] = {
@@ -1143,7 +1203,11 @@ def _run_lock_incident_once(
                 lease_seconds=incident["policy"]["lease_seconds"],
             )
             action = incident["actions"][action_index]
-            snapshot = observe_locks()
+            snapshot = _observe_lock_graph(
+                observe_locks,
+                telemetry_run=telemetry_run,
+                phase="pre_action",
+            )
             if snapshot.get("truncated") is not False:
                 incident["state"] = "REVIEW_REQUIRED"
                 incident["last_error"] = {
@@ -1366,15 +1430,30 @@ def _run_lock_incident_once(
             )
 
             try:
-                result = execute_action(
-                    deepcopy(action["proposal"]),
-                    operation_id=action["operation_id"],
-                    approval_context=_approval_context_for_action(
-                        incident,
-                        action,
-                    ),
-                    execution_context=execution_context,
-                )
+                with telemetry_run.span(
+                    "safedba.incident.execute",
+                    {
+                        "safedba.action.type": action["type"],
+                        "safedba.action.risk": action["risk"],
+                        "safedba.action.ordinal": action["ordinal"],
+                    },
+                ) as execution_span:
+                    result = execute_action(
+                        deepcopy(action["proposal"]),
+                        operation_id=action["operation_id"],
+                        approval_context=_approval_context_for_action(
+                            incident,
+                            action,
+                        ),
+                        execution_context=execution_context,
+                    )
+                    if isinstance(result, dict):
+                        execution_span.set_attribute(
+                            "safedba.action.status",
+                            _telemetry_action_status(
+                                result.get("status")
+                            ),
+                        )
             except Exception as exc:
                 incident = incident_store.load_incident(
                     incident_id
@@ -1451,7 +1530,7 @@ def _run_lock_incident_once(
 
             if (
                 result.get("status")
-                == "BLOCKED_INCIDENT_APPROVAL"
+                in {"BLOCKED_INCIDENT_APPROVAL", "BLOCKED_RUNTIME_POLICY"}
                 and action["state"] == "EXECUTING"
             ):
                 # The executor's atomic claim is the last authorization gate.
@@ -1464,8 +1543,9 @@ def _run_lock_incident_once(
                     "approval_error_type": result.get(
                         "approval_error_type"
                     ),
+                    "policy_reason": result.get("policy_reason"),
                     "message": (
-                        "The persisted execution claim was refused before "
+                        "An execution gate refused this attempt before "
                         "any authorized side effect. Fresh approval is "
                         "required."
                     ),
@@ -1558,7 +1638,11 @@ def _run_lock_incident_once(
                     action_id=action["action_id"],
                 )
 
-            post_snapshot = observe_locks()
+            post_snapshot = _observe_lock_graph(
+                observe_locks,
+                telemetry_run=telemetry_run,
+                phase="post_action",
+            )
             if post_snapshot.get("truncated") is not False:
                 action["state"] = "INCONCLUSIVE"
                 incident["state"] = "REVIEW_REQUIRED"
@@ -1615,7 +1699,11 @@ def _run_lock_incident_once(
                 action_id=action["action_id"],
             )
 
-        final_snapshot = observe_locks()
+        final_snapshot = _observe_lock_graph(
+            observe_locks,
+            telemetry_run=telemetry_run,
+            phase="final_verification",
+        )
         if final_snapshot.get("truncated") is not False:
             incident["state"] = "REVIEW_REQUIRED"
             incident["last_error"] = {
@@ -1710,6 +1798,7 @@ def run_lock_incident(
     execute_action: Callable[..., dict] = execute_action_proposal,
     approval_decider: Callable[[dict], object] | None = None,
     now: Callable[[], datetime] = utc_now,
+    telemetry_manager=None,
 ) -> dict:
     """Run one workflow pass and return the latest durable view.
 
@@ -1718,17 +1807,65 @@ def run_lock_incident(
     or a stale lease owner.
     """
     incident_store = store or SQLiteIncidentStore()
-    _run_lock_incident_once(
-        incident_id,
-        store=incident_store,
-        observe_locks=observe_locks,
-        execute_action=execute_action,
-        approval_decider=approval_decider,
-        now=now,
+    before = incident_store.load_incident(incident_id)
+    manager = (
+        telemetry_manager
+        if telemetry_manager is not None
+        else get_telemetry_manager()
     )
-    return incident_store.load_incident(
-        incident_id
+    telemetry_run = manager.start_incident_workflow(
+        workflow_type=before["workflow_type"],
+        action_count=len(before["actions"]),
+        resumed=(
+            before["state"] != "AWAITING_APPROVAL"
+            or any(
+                action.get("attempt_count", 0) > 0
+                for action in before["actions"]
+            )
+        ),
     )
+    try:
+        _run_lock_incident_once(
+            incident_id,
+            store=incident_store,
+            observe_locks=observe_locks,
+            execute_action=execute_action,
+            approval_decider=approval_decider,
+            now=now,
+            telemetry_run=telemetry_run,
+        )
+        result = incident_store.load_incident(
+            incident_id
+        )
+        action_states = [
+            action.get("state")
+            for action in result.get("actions", [])
+        ]
+        telemetry_run.finish_operation(
+            status=result["state"],
+            attributes={
+                "safedba.workflow.state": result["state"],
+                "safedba.workflow.completed_actions": sum(
+                    state in FINISHED_ACTION_STATES
+                    for state in action_states
+                ),
+                "safedba.workflow.review_required": (
+                    result["state"] == "REVIEW_REQUIRED"
+                ),
+            },
+        )
+        result["trace_id"] = telemetry_run.trace_id
+        return result
+    except Exception as exc:
+        telemetry_run.finish_operation(
+            status="failed",
+            error=True,
+            error_type=type(exc).__name__,
+            attributes={
+                "safedba.workflow.state": before["state"],
+            },
+        )
+        raise
 
 
 def incident_public_view(
@@ -1736,6 +1873,7 @@ def incident_public_view(
 ) -> dict:
     return {
         "incident_id": incident["incident_id"],
+        "trace_id": incident.get("trace_id"),
         "workflow_type": incident["workflow_type"],
         "state": incident["state"],
         "plan_revision": incident["plan_revision"],

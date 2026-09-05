@@ -8,6 +8,10 @@ import time
 import uuid
 
 import config as runtime_config
+from runtime_policy import (
+    RuntimePolicyError, filter_tools, get_runtime_policy,
+    require_operation, require_tool,
+)
 
 from agent_policy import (
     EvidenceLedger,
@@ -39,6 +43,7 @@ from db_tools import (
     get_estimated_query_plan,
     get_indexes,
     get_lock_waits,
+    get_operational_snapshot,
     get_query_plan,
     get_transaction_sessions,
     verify_runtime_security,
@@ -70,6 +75,10 @@ from experience_store import (
 
 from agent_memory import (
     SQLiteAgentMemory,
+)
+
+from telemetry import (
+    get_telemetry_manager,
 )
 
 
@@ -511,6 +520,29 @@ TOOLS = [
 {
     "type": "function",
     "function": {
+        "name": "get_operational_snapshot",
+        "description": (
+            "Collect one broad, read-only PostgreSQL operational snapshot. "
+            "It combines runtime health, cluster connection capacity, "
+            "tables ranked by dead-tuple and transaction-ID age pressure, "
+            "primary/standby replication state and lag, database size, "
+            "temporary-file counters, deadlock counters, and the largest "
+            "relations. Use this first for a general incident involving "
+            "connection exhaustion, VACUUM pressure, replication delay, "
+            "database growth, or otherwise unexplained degradation. "
+            "Database and relation sizes are not filesystem free-space "
+            "measurements. This tool makes no database changes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+},
+
+{
+    "type": "function",
+    "function": {
         "name": "get_active_sessions",
         "description": (
             "Inspect currently active PostgreSQL client sessions "
@@ -639,6 +671,10 @@ def _dispatch_builtin_tool(
 
         return get_database_health()
 
+    if name == "get_operational_snapshot":
+
+        return get_operational_snapshot()
+
     if name == "get_active_sessions":
 
         return get_active_sessions()
@@ -725,6 +761,7 @@ _TOOL_CAPABILITIES = {
     "get_column_stats": ("catalog", ToolRisk.READ, 30.0),
     "get_lock_waits": ("runtime", ToolRisk.READ, 0.0),
     "get_database_health": ("runtime", ToolRisk.READ, 0.0),
+    "get_operational_snapshot": ("runtime", ToolRisk.READ, 0.0),
     "get_active_sessions": ("runtime", ToolRisk.READ, 0.0),
     "get_transaction_sessions": ("runtime", ToolRisk.READ, 0.0),
     "propose_create_index": ("proposal", ToolRisk.MEDIUM, None),
@@ -772,6 +809,7 @@ def call_tool(
     arguments: dict,
 ):
     """Dispatch through the typed capability registry."""
+    require_tool(name)
 
     return TOOL_REGISTRY.dispatch(
         name,
@@ -785,6 +823,36 @@ def _safe_usage_count(value) -> int:
     except (TypeError, ValueError, OverflowError):
         return 0
     return parsed if parsed >= 0 else 0
+
+
+def _provider_route_metadata(provider) -> dict:
+    """Copy only bounded, non-secret provider-routing metadata."""
+
+    try:
+        value = getattr(provider, "last_call_metadata", {})
+        if callable(value):
+            value = value()
+    except Exception:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "selected_provider",
+        "selected_model",
+        "fallback_configured",
+        "fallback_used",
+        "failover_reason",
+        "primary_error_type",
+        "fallback_error_type",
+        "primary_circuit_state",
+        "fallback_circuit_state",
+    }
+    return {
+        key: item[:200] if isinstance(item, str) else item
+        for key, item in value.items()
+        if key in allowed
+        and isinstance(item, (str, bool, int, float))
+    }
 
 
 # ----------------------------------------
@@ -904,17 +972,23 @@ If the user reports:
 - an unspecified operational problem
 
 without providing a specific SQL query or known lock incident,
-use get_database_health first.
+use get_operational_snapshot first. This single observation
+includes get_database_health-style runtime evidence plus
+connection capacity, VACUUM pressure, replication state, and
+PostgreSQL-visible storage usage.
 
-Treat get_database_health as a lightweight runtime triage
-snapshot, not a complete database health assessment.
+Use get_database_health when only a lightweight session and
+transaction snapshot is needed. Treat both tools as triage
+evidence, not complete database health assessments.
 
-Use its results as routing evidence.
+Use either result as routing evidence.
 
 
 GENERAL TRIAGE ROUTING
 
-After get_database_health:
+After get_operational_snapshot, route from its runtime_health
+section. After get_database_health, route from its top-level
+fields:
 
 1. If blocked_sessions > 0:
    use get_lock_waits.
@@ -937,6 +1011,26 @@ other currently observable problems.
 
 If current tools do not establish the cause, state what evidence
 is missing.
+
+OPERATIONAL SNAPSHOT INTERPRETATION
+
+Treat connection utilization as a current cluster-wide snapshot,
+not proof that connection exhaustion caused an earlier incident.
+
+Dead-tuple counts are statistics estimates. A high ratio is a
+VACUUM or workload-investigation signal, not proof of physical
+table bloat and not automatic authority to run maintenance.
+
+An empty primary standbys list does not establish that a replica
+is missing unless the expected topology is known. Null replication
+lag fields do not mean zero lag. Primary rows cover directly
+connected standbys only, and reported lag is not a prediction of
+catch-up time.
+
+storage_usage reports PostgreSQL database and relation sizes plus
+cumulative statistics. It does not report filesystem free space.
+Never claim that disk is full or has adequate capacity from this
+tool alone.
 
 ============================================================
 1A. TOOL CALL DISCIPLINE
@@ -974,6 +1068,7 @@ Do NOT automatically run analyze_query or get_query_plan on SQL
 discovered through runtime observation tools such as:
 
 - get_database_health
+- get_operational_snapshot
 - get_active_sessions
 - get_transaction_sessions
 - get_lock_waits
@@ -1707,6 +1802,7 @@ def run_agent(
         AGENT_MAX_TOOL_OUTPUT_CHARS
     ),
     verify_environment: bool = True,
+    telemetry_manager=None,
 ) -> dict:
 
     if not isinstance(user_message, str) or not user_message.strip():
@@ -2082,6 +2178,18 @@ def run_agent(
     runtime_security = None
     memory_run_version: int | None = None
 
+    resolved_telemetry_manager = (
+        telemetry_manager
+        if telemetry_manager is not None
+        else get_telemetry_manager()
+    )
+    telemetry_run = resolved_telemetry_manager.start_run(
+        mode=resolved_mode,
+        memory_enabled=memory_enabled,
+        experience_enabled=experience_capture_enabled,
+        environment_verified=verify_environment,
+    )
+
     if resolved_memory_store is not None:
         try:
             memory_run = resolved_memory_store.start_run(
@@ -2358,11 +2466,46 @@ def run_agent(
                     ),
                 })
 
+        telemetry_run.finish(
+            status=status,
+            stop_reason=stop_reason,
+            llm_turns=llm_turns,
+            tool_calls_attempted=attempted_tool_calls,
+            tool_calls_succeeded=sum(
+                1
+                for record in ledger.records
+                if record.status == "success"
+            ),
+            total_tokens=total_tokens,
+            error_count=len(errors),
+        )
+        result["trace_id"] = telemetry_run.trace_id
+
         return result
+
+    try:
+        require_operation("AGENT_RUN")
+    except RuntimePolicyError as exc:
+        errors.append({"type": type(exc).__name__, "message": str(exc)})
+        return finish(status="stopped", stop_reason="runtime_policy_blocked")
+
+    messages.append({
+        "role": "system",
+        "content": (
+            "Trusted runtime execution policy (not a user preference): "
+            + json.dumps(get_runtime_policy(), ensure_ascii=False)
+            + ". Do not request blocked operations. In production use estimated "
+            "plans and catalog/session observations; do not claim runtime evidence. "
+            "Proposals never override execution policy or human approval."
+        ),
+    })
 
     if verify_environment:
         try:
-            runtime_security = verify_runtime_security()
+            with telemetry_run.span(
+                "safedba.runtime_security.verify"
+            ):
+                runtime_security = verify_runtime_security()
         except Exception as exc:
             errors.append({
                 "type": type(exc).__name__,
@@ -2376,6 +2519,11 @@ def run_agent(
             )
 
     for iteration in range(max_iterations):
+        try:
+            require_operation("AGENT_RUN")
+        except RuntimePolicyError as exc:
+            errors.append({"type": type(exc).__name__, "message": str(exc)})
+            return finish(status="stopped", stop_reason="runtime_policy_blocked")
         if (
             time.monotonic() - started
             >= deadline_seconds
@@ -2386,20 +2534,75 @@ def run_agent(
             )
 
         model_started = time.monotonic()
+        provider_route = {}
         try:
-            response = provider_instance.complete(
-                messages=messages,
-                tools=available_tools,
-                tool_choice="auto",
-            )
+            with telemetry_run.span(
+                "safedba.llm.complete",
+                {
+                    "safedba.iteration": iteration + 1,
+                    "gen_ai.request.model": getattr(
+                        provider_instance,
+                        "model",
+                        None,
+                    ),
+                },
+            ) as model_span:
+                response = provider_instance.complete(
+                    messages=messages,
+                    tools=filter_tools(available_tools, get_runtime_policy()),
+                    tool_choice="auto",
+                )
+                provider_route = _provider_route_metadata(
+                    provider_instance
+                )
+                set_attribute = getattr(
+                    model_span,
+                    "set_attribute",
+                    None,
+                )
+                if callable(set_attribute):
+                    telemetry_attributes = {
+                        "gen_ai.response.model": provider_route.get(
+                            "selected_model"
+                        ),
+                        "safedba.llm.provider": provider_route.get(
+                            "selected_provider"
+                        ),
+                        "safedba.llm.fallback_used": provider_route.get(
+                            "fallback_used"
+                        ),
+                        "safedba.llm.failover_reason": provider_route.get(
+                            "failover_reason"
+                        ),
+                        "safedba.llm.primary_circuit_state": (
+                            provider_route.get(
+                                "primary_circuit_state"
+                            )
+                        ),
+                    }
+                    try:
+                        for key, value in telemetry_attributes.items():
+                            if value is not None:
+                                set_attribute(key, value)
+                    except Exception:
+                        # Optional observability must not change an otherwise
+                        # valid model response into an Agent failure.
+                        pass
         except Exception as exc:
+            provider_route = _provider_route_metadata(
+                provider_instance
+            )
             model_trace.append({
                 "iteration": iteration + 1,
-                "model": getattr(
-                    provider_instance,
-                    "model",
-                    None,
+                "model": (
+                    provider_route.get("selected_model")
+                    or getattr(
+                        provider_instance,
+                        "model",
+                        None,
+                    )
                 ),
+                "provider_route": provider_route,
                 "status": "error",
                 "duration_ms": round(
                     (time.monotonic() - model_started) * 1000.0,
@@ -2442,11 +2645,15 @@ def run_agent(
         total_tokens += turn_total_tokens
         model_trace.append({
             "iteration": iteration + 1,
-            "model": getattr(
-                provider_instance,
-                "model",
-                None,
+            "model": (
+                provider_route.get("selected_model")
+                or getattr(
+                    provider_instance,
+                    "model",
+                    None,
+                )
             ),
+            "provider_route": provider_route,
             "status": "success",
             "duration_ms": round(
                 (time.monotonic() - model_started) * 1000.0,
@@ -2888,33 +3095,42 @@ def run_agent(
             tool_started = time.monotonic()
 
             try:
-                result = call_tool(
-                    tool_name,
-                    arguments,
-                )
-                duration_ms = (
-                    time.monotonic()
-                    - tool_started
-                ) * 1000.0
-
-                if tool_name in PROPOSAL_TOOLS:
-                    if not isinstance(result, dict):
-                        raise TypeError(
-                            "Proposal tool returned a non-object."
-                        )
-                    result = dict(result)
-                    result["evidence_refs"] = (
-                        evidence_refs
+                tool_spec = TOOL_REGISTRY.get(tool_name)
+                with telemetry_run.span(
+                    "safedba.tool.call",
+                    {
+                        "safedba.tool.name": tool_name,
+                        "safedba.tool.category": tool_spec.category,
+                        "safedba.tool.risk": tool_spec.risk.value,
+                    },
+                ):
+                    result = call_tool(
+                        tool_name,
+                        arguments,
                     )
-                    shape_check = validate_proposal_shape(result)
-                    if not shape_check.get("valid"):
-                        raise ValueError(
-                            "Built proposal failed deterministic shape "
-                            "validation: "
-                            + "; ".join(
-                                shape_check.get("errors", [])
+                    duration_ms = (
+                        time.monotonic()
+                        - tool_started
+                    ) * 1000.0
+
+                    if tool_name in PROPOSAL_TOOLS:
+                        if not isinstance(result, dict):
+                            raise TypeError(
+                                "Proposal tool returned a non-object."
                             )
+                        result = dict(result)
+                        result["evidence_refs"] = (
+                            evidence_refs
                         )
+                        shape_check = validate_proposal_shape(result)
+                        if not shape_check.get("valid"):
+                            raise ValueError(
+                                "Built proposal failed deterministic shape "
+                                "validation: "
+                                + "; ".join(
+                                    shape_check.get("errors", [])
+                                )
+                            )
 
                 record = ledger.add(
                     tool=tool_name,
@@ -3021,6 +3237,13 @@ def review_execution_result(
     proposal: dict,
     execution_result: dict,
 ) -> str:
+    try:
+        require_operation("AGENT_RUN")
+    except RuntimePolicyError:
+        return (
+            "LLM review skipped by runtime policy. Refer to the deterministic "
+            "execution result; no additional review request was sent."
+        )
 
     review_instructions = """
 You are SafeDBA reviewing the outcome of a controlled database

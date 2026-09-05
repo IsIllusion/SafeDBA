@@ -3,6 +3,19 @@
 These scripts are manual integration and safety verification utilities for
 SafeDBA. They are not automated unit tests.
 
+For repeatable verification, prefer the disposable runner from the project
+root:
+
+```powershell
+python scripts/run_postgres_integration.py --pg-bin "C:\Program Files\PostgreSQL\18\bin"
+```
+
+It creates its own test database and runs real PostgreSQL scenarios without
+paid model calls. See [testing and evaluation](../../README.md#testing-and-evaluation)
+for the platform requirements and the separate, opt-in real-model evaluation.
+The scripts below use their configured environment; they do not provide that
+automatic disposable-cluster boundary.
+
 They may require:
 
 - a running PostgreSQL instance
