@@ -3,6 +3,43 @@
 This file records implemented project changes, not production certifications
 or claims that all configured CI platforms have already been exercised.
 
+## 2026-09-08 — LangGraph and LangChain migration
+
+### Changed
+
+- Replaced the custom diagnostic iteration loop with a compiled LangGraph
+  `StateGraph`, with separate model, serial-tool, and evidence-citation nodes.
+- Routed compatible providers through a LangChain `BaseChatModel` adapter and
+  added native `chat_model` injection to diagnosis and execution-result review.
+- Added `StructuredTool` dispatch using the registry's exact schemas and
+  capability metadata, retaining all deterministic authorization checks.
+- Preserved existing CLI/result contracts, SQLite memory and incident schemas,
+  provider resilience, execution approval, and independent-worker isolation.
+- Kept raw malformed calls and reasoning extensions available to validation;
+  native message history retains provider-specific and signed content blocks.
+- Separated graph steps from model-turn limits and disabled framework node
+  retry, model caching, and automatic payload tracing in diagnostic runs.
+
+### Verified locally
+
+- 323 portable tests passed on Windows with Python 3.10.20 and 3.12.14;
+  dependency consistency checks passed in both environments.
+- 31 differential tests compare the migrated runtime with a frozen reference
+  from commit `415486a`, including memory lifecycle and deadline behavior.
+- 19 LangChain contract tests and five graph-scheduler tests cover native
+  models, exact schemas, message preservation, budget alignment, and isolation.
+- 19 PostgreSQL 18.4 integration tests passed in three consecutive final runs,
+  including a native LangChain
+  graph producing three real blocker proposals before one workflow approval,
+  and existing cross-process grant/crash safety checks.
+- Stabilized a Windows HTTP test's request framing without changing executor
+  authentication or application behavior. CI now checks dependency consistency.
+
+No paid model requests were made for this migration. The previous live-model
+evaluation remains a historical baseline, not a post-migration model score.
+Diagnostic LangGraph checkpoint/replay is not enabled; existing durable lock
+recovery remains authoritative. See [the migration guide](docs/LANGGRAPH_MIGRATION.md).
+
 ## 2026-09-05 — Evaluation and execution-isolation groundwork
 
 ### Added

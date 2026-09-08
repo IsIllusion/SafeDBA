@@ -179,7 +179,14 @@ class ProtocolTests(unittest.TestCase):
             for body, token, status in ((canonical(request()), "wrong", 401), ('{"sql":"SELECT 1"}', "t" * 32, 400), ('{"version":1,"version":1}', "t" * 32, 400)):
                 connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
                 try:
-                    connection.request("POST", "/execute", body=body, headers={"Authorization": "Bearer " + token})
+                    # Deliver the small test frame in one write. With separate
+                    # header/body writes, Windows may reset the socket when the
+                    # server correctly rejects authentication before reading the
+                    # body, racing the test's attempt to read the 401 response.
+                    chunks = []
+                    with patch.object(connection, "send", chunks.append):
+                        connection.request("POST", "/execute", body=body, headers={"Authorization": "Bearer " + token})
+                    connection.send(b"".join(chunks))
                     response = connection.getresponse()
                     response.read()
                     self.assertEqual(response.status, status)

@@ -7,6 +7,9 @@ import math
 import time
 import uuid
 
+from agent_graph import run_diagnostic_graph
+from langchain_bridge import LangChainProvider, langchain_tools
+
 import config as runtime_config
 from runtime_policy import (
     RuntimePolicyError, filter_tools, get_runtime_policy,
@@ -1785,6 +1788,7 @@ def run_agent(
     mode: str = "diagnose",
     allowed_actions: set[str] | None = None,
     provider=None,
+    chat_model=None,
     memory_store=None,
     use_memory: bool | None = None,
     experience_store=None,
@@ -2156,10 +2160,12 @@ def run_agent(
         "content": user_message,
     })
 
-    provider_instance = (
-        provider
-        if provider is not None
-        else get_llm_provider()
+    if provider is not None and chat_model is not None:
+        raise ValueError("Pass provider or chat_model, not both.")
+    provider_instance = LangChainProvider(
+        provider=(provider if provider is not None else get_llm_provider())
+        if chat_model is None else None,
+        chat_model=chat_model,
     )
     proposals: list[dict] = []
     tool_trace: list[dict] = []
@@ -2518,7 +2524,16 @@ def run_agent(
                 ),
             )
 
-    for iteration in range(max_iterations):
+    # Each graph invocation owns its ledger, handles, and serial tool wrappers.
+    # Capabilities stay run-local; graph snapshots carry no execution authority.
+    message = None
+    tool_calls = []
+    finish_reason = None
+    framework_tools = langchain_tools(TOOL_REGISTRY, call_tool)
+
+    def model_step(iteration):
+        nonlocal message, tool_calls, finish_reason
+        nonlocal llm_turns, prompt_tokens, completion_tokens, total_tokens
         try:
             require_operation("AGENT_RUN")
         except RuntimePolicyError as exc:
@@ -2704,7 +2719,7 @@ def run_agent(
 
         messages.append(
             provider_instance
-            .assistant_message_to_dict(
+            .assistant_message_for_history(
                 message
             )
         )
@@ -2753,82 +2768,84 @@ def run_agent(
                 stop_reason="malformed_provider_response",
             )
 
-        if not tool_calls:
-            content = (
-                getattr(message, "content", None)
-                or ""
+    def answer_step(iteration):
+        content = (
+            getattr(message, "content", None)
+            or ""
+        )
+
+        if not content.strip():
+            errors.append({
+                "type": "EmptyAgentAnswer",
+                "message": (
+                    "Model returned neither tools nor an answer."
+                ),
+            })
+            return finish(
+                status="failed",
+                stop_reason="empty_model_response",
             )
 
-            if not content.strip():
-                errors.append({
-                    "type": "EmptyAgentAnswer",
-                    "message": (
-                        "Model returned neither tools nor an answer."
-                    ),
-                })
-                return finish(
-                    status="failed",
-                    stop_reason="empty_model_response",
-                )
+        if finish_reason in {
+            "length",
+            "content_filter",
+        }:
+            return finish(
+                status="stopped",
+                stop_reason=(
+                    "model_" + finish_reason
+                ),
+                answer=content,
+            )
 
-            if finish_reason in {
-                "length",
-                "content_filter",
-            }:
+        required_refs = {
+            ref
+            for proposal in proposals
+            for ref in proposal.get(
+                "evidence_refs",
+                [],
+            )
+            if isinstance(ref, str)
+        }
+        citation_errors = validate_answer_evidence(
+            content,
+            ledger.records,
+            required_refs=required_refs,
+        )
+        if citation_errors:
+            if iteration + 1 >= max_iterations:
+                errors.append({
+                    "type": "EvidenceCitationRequired",
+                    "messages": citation_errors,
+                })
                 return finish(
                     status="stopped",
                     stop_reason=(
-                        "model_" + finish_reason
+                        "evidence_citation_missing"
                     ),
                     answer=content,
                 )
 
-            required_refs = {
-                ref
-                for proposal in proposals
-                for ref in proposal.get(
-                    "evidence_refs",
-                    [],
-                )
-                if isinstance(ref, str)
-            }
-            citation_errors = validate_answer_evidence(
-                content,
-                ledger.records,
-                required_refs=required_refs,
-            )
-            if citation_errors:
-                if iteration + 1 >= max_iterations:
-                    errors.append({
-                        "type": "EvidenceCitationRequired",
-                        "messages": citation_errors,
-                    })
-                    return finish(
-                        status="stopped",
-                        stop_reason=(
-                            "evidence_citation_missing"
-                        ),
-                        answer=content,
-                    )
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Deterministic evidence policy rejected the "
+                    "draft answer. Revise it without calling more "
+                    "tools and cite the required successful evidence "
+                    "references exactly. "
+                    + " ".join(citation_errors)
+                ),
+            })
+            return None
 
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Deterministic evidence policy rejected the "
-                        "draft answer. Revise it without calling more "
-                        "tools and cite the required successful evidence "
-                        "references exactly. "
-                        + " ".join(citation_errors)
-                    ),
-                })
-                continue
+        return finish(
+            status="completed",
+            stop_reason="final_answer",
+            answer=content,
+        )
 
-            return finish(
-                status="completed",
-                stop_reason="final_answer",
-                answer=content,
-            )
-
+    def tools_step(iteration):
+        nonlocal attempted_tool_calls
         if len(tool_calls) > max_tool_calls_per_turn:
             errors.append({
                 "type": "ToolBudgetExceeded",
@@ -3104,9 +3121,8 @@ def run_agent(
                         "safedba.tool.risk": tool_spec.risk.value,
                     },
                 ):
-                    result = call_tool(
-                        tool_name,
-                        arguments,
+                    result = framework_tools[tool_name].invoke(
+                        arguments, config={"callbacks": []},
                     )
                     duration_ms = (
                         time.monotonic()
@@ -3228,14 +3244,36 @@ def run_agent(
             f"ITERATION_{iteration + 1}_TOOLS_COMPLETED"
         )
 
-    return finish(
-        status="stopped",
-        stop_reason="max_iterations_exceeded",
+    def graph_snapshot():
+        return {
+            "messages": list(messages),
+            "usage": {
+                "llm_turns": llm_turns,
+                "tool_calls_attempted": attempted_tool_calls,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+            "evidence_refs": [record.ref for record in ledger.records],
+        }
+
+    return run_diagnostic_graph(
+        model_step=model_step,
+        tools_step=tools_step,
+        answer_step=answer_step,
+        has_tool_calls=lambda: bool(tool_calls),
+        snapshot=graph_snapshot,
+        exhausted=lambda: finish(
+            status="stopped", stop_reason="max_iterations_exceeded",
+        ),
+        max_iterations=max_iterations,
     )
 
 def review_execution_result(
     proposal: dict,
     execution_result: dict,
+    *,
+    chat_model=None,
 ) -> str:
     try:
         require_operation("AGENT_RUN")
@@ -3540,9 +3578,10 @@ Keep the response concise, technical, and evidence-driven.
         ),
     }
 
-    provider = (
-    get_llm_provider()
-)
+    provider = LangChainProvider(
+        provider=get_llm_provider() if chat_model is None else None,
+        chat_model=chat_model,
+    )
 
     response = (
         provider.complete(

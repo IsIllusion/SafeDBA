@@ -8,14 +8,20 @@ language model can decide what to inspect and explain what it finds, while a
 deterministic control plane owns validation, approval, execution, and
 verification.
 
+LangGraph orchestrates the diagnostic workflow. LangChain provides model and
+tool interfaces, while SafeDBA retains its database-specific safety controls.
+
 > **The model reasons about the incident. Deterministic code controls the
 > database.**
 
-## Validation Summary — 2026-09-05
+## Validation Summary — 2026-09-08
 
-The latest local verification passed 268 portable tests and 18 real PostgreSQL
-integration tests. A separate real-provider evaluation passed three
-synthetic diagnosis cases using DeepSeek `deepseek-v4-flash` in eight requests.
+The latest local verification passed 323 portable tests on Windows with Python
+3.10 and 3.12, plus 19 real PostgreSQL integration tests. Migration checks
+include 31 differential comparisons with the previous Agent loop and 19
+LangChain interface tests. The earlier real-provider baseline passed three
+synthetic diagnosis cases using DeepSeek `deepseek-v4-flash` in eight requests;
+that baseline predates the framework migration.
 The test suites cover Agent control flow, evidence validation, database
 permissions, multi-blocker workflows, and cross-process execution.
 
@@ -27,6 +33,7 @@ provisioned OS accounts and filesystem ACLs to enforce process isolation.
 
 Documentation:
 
+- [LangGraph/LangChain architecture, migration and compatibility](docs/LANGGRAPH_MIGRATION.md)
 - [Independent executor: setup, approval and recovery](docs/ISOLATED_EXECUTOR.md)
 - [Real-model evaluation: results, reproduction and limitations](docs/LIVE_MODEL_EVALUATION.md)
 - [Change history](CHANGELOG.md)
@@ -36,6 +43,7 @@ Documentation:
 ## What SafeDBA Provides
 
 - SQL performance diagnosis based on PostgreSQL plans and runtime metrics
+- LangGraph orchestration with LangChain-compatible model and tool interfaces
 - index, column, and statistics inspection
 - single-call operational triage for sessions, connection capacity, VACUUM
   pressure, replication, and PostgreSQL-visible storage usage
@@ -75,10 +83,10 @@ index/statistics/rewrite workflows; see [Runtime policy](#runtime-policy).
 
 ```mermaid
 flowchart TD
-    U[User / Incident] --> A[SafeDBA Agent]
+    U[User / Incident] --> A[LangGraph Diagnostic Agent]
 
     A <--> M[Scoped Memory]
-    A --> TR[Typed Tool Registry]
+    A --> TR[Typed Registry / LangChain Tools]
     TR --> T[Read-Only Evidence Tools]
     T <--> PG[(PostgreSQL)]
     T --> E[Evidence Ledger]
@@ -113,6 +121,13 @@ The diagram describes the logical workflow. In the default `combined` profile,
 execution remains local. In the isolated profile, lock execution crosses the
 authenticated loopback channel and the worker applies an additional private
 grant gate before the same deterministic validation and execution path.
+
+The graph has separate model, serial-tool, and evidence-citation nodes.
+Existing CLI and `run_agent` callers remain compatible; applications can inject
+a LangChain chat model through `run_agent(..., chat_model=model)`. Durable lock
+recovery remains in `IncidentWorkflow`, separate from the diagnostic graph.
+See the [integration guide](docs/LANGGRAPH_MIGRATION.md) for API examples,
+behavioral alignment tests, and persistence boundaries.
 
 ---
 
@@ -313,7 +328,9 @@ no online self-training or autonomous policy-replacement loop.
 SafeDBA/
 |-- src/
 |   |-- main.py                  # CLI and workflow routing
-|   |-- agent.py                 # Agent loop and evidence tools
+|   |-- agent.py                 # Policy-bearing Agent nodes and evidence tools
+|   |-- agent_graph.py           # LangGraph diagnostic state and transitions
+|   |-- langchain_bridge.py      # Model/message and typed-tool interoperability
 |   |-- agent_policy.py          # Deterministic orchestration policy
 |   |-- tool_registry.py         # Typed capability registry
 |   |-- agent_memory.py          # Session, episode, and run persistence
@@ -340,8 +357,8 @@ SafeDBA/
 |   `-- evaluate.py              # Regression evaluator
 |-- tests/                       # Unit and protocol tests
 |   |-- integration/             # Opt-in real PostgreSQL scenarios
-|   `-- fixtures/                # Dedicated disposable database fixture
-|-- docs/                        # Executor deployment and evaluation details
+|   `-- fixtures/                # Disposable DB fixture and legacy replay oracle
+|-- docs/                        # Framework integration, deployment and evaluation
 |-- benchmarks/                  # Controlled regression cases and snapshots
 |-- scripts/
 |   |-- run_postgres_integration.py # Disposable cluster/test orchestration
@@ -441,8 +458,8 @@ evaluator behavior.
 python -m unittest discover -s tests -v
 ```
 
-The suite currently discovers **286 tests**: 268 portable unit and protocol
-tests plus 18 live PostgreSQL integration tests. Without a database, the live
+The suite currently discovers **342 tests**: 323 portable unit and protocol
+tests plus 19 live PostgreSQL integration tests. Without a database, the live
 tests skip automatically; no test requires a live LLM.
 
 The suite includes cross-process audit contention/crash recovery, production
@@ -460,6 +477,8 @@ publish machine-readable results. The real database tests cover:
 - lost workflow results after a real termination, without repeating the action;
 - catalog-identity-bound index cleanup;
 - a scripted Agent calling real evidence tools without executing proposals;
+- a native LangChain model interface driving the graph through observation,
+  three blocker proposals, and one exact-scope workflow approval;
 - a separate Agent process without privileged DB passwords resolving three
   locks through a worker, missing/tampered grant refusals, and worker exit
   after a real effect without automatic replay.

@@ -1,4 +1,7 @@
 openai>=1.40,<3
+langchain>=1.4,<2
+langgraph>=1.2.11,<2
+langchain-openai>=1.6,<2
 psycopg[binary]>=3.2,<4
 python-dotenv>=1,<2
 mcp>=2,<3

@@ -269,6 +269,59 @@ class PostgreSQLIncidentIntegrationTests(unittest.TestCase):
         self.assertTrue(any(item["tool"] == "get_lock_waits" for item in result["tool_trace"]))
         self.assertEqual(len(self.locks.wait_for(1)), 1)
 
+    def test_native_langchain_graph_proposes_three_real_blockers_before_one_approval(self):
+        from langchain_core.language_models import BaseChatModel
+        from langchain_core.messages import AIMessage, ToolMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        for row_id in (1, 2, 3):
+            self.locks.add_blocker(row_id)
+            self.locks.add_waiter(row_id)
+        self.locks.wait_for(3)
+
+        class LockChatModel(BaseChatModel):
+            @property
+            def _llm_type(self):
+                return "scripted-native-contract-not-live-LLM"
+
+            def bind_tools(self, tools, **kwargs):
+                return self.bind(tools=tools, **kwargs)
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                evidence = [json.loads(m.content) for m in messages if isinstance(m, ToolMessage)]
+                if not evidence:
+                    message = AIMessage(content="", tool_calls=[{
+                        "id": "locks", "name": "get_lock_waits", "args": {},
+                    }])
+                elif len(evidence) == 1:
+                    rows = evidence[0]["data"]
+                    message = AIMessage(content="", tool_calls=[{
+                        "id": f"proposal-{index}", "name": "propose_terminate_backend",
+                        "args": {key: value for key, value in proposal(row).items() if key not in {"type", "risk"}},
+                    } for index, row in enumerate(rows)])
+                else:
+                    message = AIMessage(content="Three blockers observed [ev-0001]; proposals [ev-0002] [ev-0003] [ev-0004]. No action executed.")
+                return ChatResult(generations=[ChatGeneration(message=message)])
+
+        result = run_agent(
+            "Propose termination of the three disposable blockers.", mode="propose",
+            allowed_actions={"TERMINATE_BACKEND"}, chat_model=LockChatModel(),
+            use_memory=False, capture_experience=False,
+        )
+        self.assertEqual(result["status"], "completed", result.get("errors"))
+        self.assertEqual(len(result["proposals"]), 3, result.get("tool_trace"))
+        self.assertEqual(result["usage"]["llm_turns"], 3)
+        self.assertEqual(len(self.locks.wait_for(3)), 3)
+        incident = create_lock_incident(
+            proposals=result["proposals"], user_request="Approve the exact three-blocker fixture",
+            expand_all_actionable=False, store=self.store,
+        )
+        completed, approvals = self.run_workflow(incident)
+        self.assertEqual(completed["state"], "COMPLETED", completed.get("last_error"))
+        self.assertEqual(len(approvals), 1)
+        self.assertEqual([a["attempt_count"] for a in completed["actions"]], [1, 1, 1])
+        self.assertEqual(db_tools.get_lock_graph_snapshot()["rows"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
