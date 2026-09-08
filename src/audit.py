@@ -1,4 +1,5 @@
-﻿import json
+from serialization import canonical_json as _canonical_json
+import json
 
 import hashlib
 import errno
@@ -114,16 +115,6 @@ def sanitize_audit_value(
         ]
 
     return value
-
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
 
 
 def _chain_hash(

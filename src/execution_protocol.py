@@ -1,5 +1,6 @@
 """Small, strict, dependency-free remote execution wire protocol."""
-import hashlib
+from serialization import canonical_json as canonical
+from serialization import json_digest
 import json
 import math
 import uuid
@@ -7,12 +8,8 @@ import uuid
 MAX_BODY = 32_768
 
 
-def canonical(value):
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-
-
 def digest(value):
-    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+    return json_digest(value)
 
 
 def strict_json(raw):

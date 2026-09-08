@@ -9,7 +9,8 @@ responsible for evidence validation, approvals, execution, and recovery.
 | Responsibility | Implementation |
 |---|---|
 | Model/tool/answer transitions | `src/agent_graph.py`: compiled LangGraph `StateGraph` |
-| Diagnostic policy and run lifecycle | `src/agent.py`: separate model, tools, and answer node callbacks |
+| Public API and integration composition | `src/agent.py` and `src/agent_dependencies.py` |
+| Diagnostic nodes and run lifecycle | `src/agent_runtime.py`, `src/agent_tool_execution.py`, and `src/agent_context.py` |
 | Model interoperability | `src/langchain_bridge.py`: `BaseChatModel`, native `AIMessage` history, and a compatible-provider adapter |
 | Tool invocation | LangChain `StructuredTool` wrappers built from the existing immutable registry schemas |
 | Evidence and proposal authorization | Existing `EvidenceLedger`, mode filters, freshness checks, and schema validation |
@@ -142,9 +143,12 @@ network behavior and must be trusted by the deploying application.
 
 ## Verification — 2026-09-08
 
-The automated suite discovers **342 tests**: **323 portable tests** and **19
+The automated suite discovers **384 tests**: **365 portable tests** and **19
 PostgreSQL integration tests**. Portable coverage includes:
 
+- 42 modular-refactor checks against commit `d42113b`, covering exact contracts,
+  dispatch, messages, persistence, pure grading and shared primitives. See the
+  [module maintenance guide](CODE_STRUCTURE.md).
 - 31 differential checks against the frozen legacy loop: outputs, available
   tools, actual dispatches, provider message batches, token usage, memory
   checkpoints, and failures. Only timing fields are excluded from comparisons.

@@ -1,5 +1,6 @@
+from identifiers import is_positive_int as _valid_positive_int
+from serialization import canonical_json as _canonical_json
 import hashlib
-import json
 import math
 import uuid
 
@@ -80,28 +81,12 @@ def iso_utc(value: datetime) -> str:
     ).isoformat()
 
 
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
 
 
 def _sha256(value: object) -> str:
     return hashlib.sha256(
         _canonical_json(value).encode("utf-8")
     ).hexdigest()
-
-
-def _valid_positive_int(value: object) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and value > 0
-    )
 
 
 def _nonblank(value: object) -> bool:

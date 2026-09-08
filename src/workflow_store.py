@@ -1,8 +1,10 @@
-import hashlib
+from state_database import open_state_database
+from serialization import canonical_json, json_digest
+from identifiers import is_valid_uuid as _valid_uuid
+from identifiers import is_positive_int as _valid_positive_int
 import json
 import math
 import sqlite3
-import uuid
 
 from contextlib import closing
 from copy import deepcopy
@@ -123,13 +125,7 @@ ACTIVE_INCIDENT_STATES = {
 
 
 def _json_dump(value: object) -> str:
-    return json.dumps(
-        sanitize_audit_value(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
+    return canonical_json(sanitize_audit_value(value))
 
 
 def _json_load(value: str | None):
@@ -139,15 +135,7 @@ def _json_load(value: str | None):
 
 
 def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
+    return json_digest(value)
 
 
 def _utc_iso(
@@ -163,24 +151,6 @@ def _utc_iso(
     return current.astimezone(
         timezone.utc
     ).isoformat()
-
-
-def _valid_uuid(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        uuid.UUID(value)
-    except (ValueError, AttributeError):
-        return False
-    return True
-
-
-def _valid_positive_int(value: object) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and value > 0
-    )
 
 
 def _waiter_identity(value: dict) -> tuple:
@@ -213,22 +183,7 @@ class SQLiteIncidentStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            self.path,
-            timeout=5.0,
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute(
-            "PRAGMA foreign_keys = ON"
-        )
-        connection.execute(
-            "PRAGMA busy_timeout = 5000"
-        )
-        connection.execute(
-            "PRAGMA synchronous = FULL"
-        )
-        return connection
+        return open_state_database(self.path)
 
     def _initialize(self) -> None:
         with closing(self._connect()) as connection:

@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from serialization import canonical_json
+
 
 SCHEMA_VERSION = 1
 DATASET_SCHEMA_VERSION = 1
@@ -221,13 +223,7 @@ def _validate_string_collection(
 
 def _canonical_json(value: object) -> str:
     try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+        return canonical_json(value)
     except (TypeError, ValueError) as exc:
         raise ExperienceValidationError(
             "Experience values must be strict JSON data."

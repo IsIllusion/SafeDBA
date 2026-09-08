@@ -1,3 +1,4 @@
+from state_database import open_state_database
 import json
 import re
 import sqlite3
@@ -293,22 +294,7 @@ class SQLiteAgentMemory:
         return value
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            self.path,
-            timeout=5.0,
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute(
-            "PRAGMA foreign_keys = ON"
-        )
-        connection.execute(
-            "PRAGMA busy_timeout = 5000"
-        )
-        connection.execute(
-            "PRAGMA synchronous = FULL"
-        )
-        return connection
+        return open_state_database(self.path)
 
     @contextmanager
     def _transaction(

@@ -3,6 +3,30 @@
 This file records implemented project changes, not production certifications
 or claims that all configured CI platforms have already been exercised.
 
+## 2026-09-08 — Modular refactor and compatibility consolidation
+
+### Changed
+
+- Reduced the public Agent module from 3,691 to 204 lines by extracting
+  run-local state, dependency composition, graph nodes, serial tool processing,
+  prompts, tool contracts and execution-result review into focused modules.
+- Consolidated repeated tool replies, strict JSON/hash encoding, identifier
+  predicates, deterministic index naming and identical state-store connections.
+- Separated pure benchmark grading from model/database execution and reporting.
+- Preserved public calls, prompts, all 15 tool contracts, result shapes,
+  persistence schemas, runtime policy and independent approval/execution gates.
+- Added a [module ownership and maintenance guide](docs/CODE_STRUCTURE.md).
+
+### Verified locally
+
+- 365 portable tests passed on Python 3.10.20 and 3.12.14, including 42 new
+  refactor checks against frozen commit `d42113b`; both dependency environments
+  passed consistency checks.
+- All 19 PostgreSQL 18.4 integration tests passed in three consecutive runs,
+  including real three-blocker approval and cross-process execution recovery.
+- No observed regression in covered behavior; no live-model requests, schema
+  migration or new Agent capability is part of this refactor.
+
 ## 2026-09-08 — LangGraph and LangChain migration
 
 ### Changed

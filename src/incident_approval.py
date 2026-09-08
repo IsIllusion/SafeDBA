@@ -1,8 +1,7 @@
-import hashlib
+from identifiers import is_valid_uuid as _valid_uuid
+from serialization import json_digest
 import hmac
-import json
 import math
-import uuid
 
 from datetime import (
     datetime,
@@ -164,28 +163,7 @@ def compute_scope_digest(
         "max_actions": max_actions,
         "max_risk": max_risk,
     }
-    serialized = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return hashlib.sha256(
-        serialized.encode("utf-8")
-    ).hexdigest()
-
-
-def _valid_uuid(
-    value: object,
-) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        uuid.UUID(value)
-    except (ValueError, AttributeError):
-        return False
-    return True
+    return json_digest(payload)
 
 
 def validate_approval_context(

@@ -16,8 +16,9 @@ tool interfaces, while SafeDBA retains its database-specific safety controls.
 
 ## Validation Summary — 2026-09-08
 
-The latest local verification passed 323 portable tests on Windows with Python
-3.10 and 3.12, plus 19 real PostgreSQL integration tests. Migration checks
+The latest local verification passed 365 portable tests on Windows with Python
+3.10 and 3.12, plus 19 real PostgreSQL integration tests in three consecutive
+runs. Refactor coverage includes 42 compatibility checks. Migration checks
 include 31 differential comparisons with the previous Agent loop and 19
 LangChain interface tests. The earlier real-provider baseline passed three
 synthetic diagnosis cases using DeepSeek `deepseek-v4-flash` in eight requests;
@@ -33,6 +34,7 @@ provisioned OS accounts and filesystem ACLs to enforce process isolation.
 
 Documentation:
 
+- [Code structure, module ownership and refactor verification](docs/CODE_STRUCTURE.md)
 - [LangGraph/LangChain architecture, migration and compatibility](docs/LANGGRAPH_MIGRATION.md)
 - [Independent executor: setup, approval and recovery](docs/ISOLATED_EXECUTOR.md)
 - [Real-model evaluation: results, reproduction and limitations](docs/LIVE_MODEL_EVALUATION.md)
@@ -328,7 +330,15 @@ no online self-training or autonomous policy-replacement loop.
 SafeDBA/
 |-- src/
 |   |-- main.py                  # CLI and workflow routing
-|   |-- agent.py                 # Policy-bearing Agent nodes and evidence tools
+|   |-- agent.py                 # Public API and dependency composition
+|   |-- agent_dependencies.py    # Explicit integration boundary
+|   |-- agent_context.py         # Run-local state and persistence lifecycle
+|   |-- agent_runtime.py         # Diagnostic model and answer nodes
+|   |-- agent_tool_execution.py  # Serial evidence/proposal tool processing
+|   |-- agent_tool_catalog.py    # Stable tool schemas and capabilities
+|   |-- agent_tools.py           # Registry construction and tool bindings
+|   |-- agent_prompts.py         # Diagnostic and review instructions
+|   |-- agent_review.py          # Read-only execution-result explanation
 |   |-- agent_graph.py           # LangGraph diagnostic state and transitions
 |   |-- langchain_bridge.py      # Model/message and typed-tool interoperability
 |   |-- agent_policy.py          # Deterministic orchestration policy
@@ -352,9 +362,13 @@ SafeDBA/
 |   |-- runtime_policy.py        # Environment gates and live stop controls
 |   |-- telemetry.py             # Optional metadata-only tracing
 |   |-- integration_guard.py     # Disposable database identity checks
+|   |-- serialization.py         # Strict JSON and compatible hashing
+|   |-- identifiers.py           # Shared predicates and index naming
+|   |-- state_database.py        # Memory/incident SQLite connection profile
 |   |-- live_evaluate.py         # Bounded real-provider evaluation
 |   |-- config.py                # Environment configuration and bounds
-|   `-- evaluate.py              # Regression evaluator
+|   |-- evaluation_policy.py     # Pure benchmark grading rules
+|   `-- evaluate.py              # Benchmark execution and reporting
 |-- tests/                       # Unit and protocol tests
 |   |-- integration/             # Opt-in real PostgreSQL scenarios
 |   `-- fixtures/                # Disposable DB fixture and legacy replay oracle
@@ -458,7 +472,7 @@ evaluator behavior.
 python -m unittest discover -s tests -v
 ```
 
-The suite currently discovers **342 tests**: 323 portable unit and protocol
+The suite currently discovers **384 tests**: 365 portable unit and protocol
 tests plus 19 live PostgreSQL integration tests. Without a database, the live
 tests skip automatically; no test requires a live LLM.
 

@@ -1,11 +1,11 @@
-﻿from db_tools import (
+from identifiers import build_index_name
+from db_tools import (
     ensure_read_only_query,
     get_indexes,
     get_lock_waits,
     get_table_columns,
 )
 
-import hashlib
 import math
 
 from diagnostics import (
@@ -15,40 +15,6 @@ from diagnostics import (
 from safety import (
     assess_risk,
 )
-
-
-def build_index_name(
-    table: str,
-    column: str,
-) -> str:
-    """Build a stable PostgreSQL identifier no longer than 63 bytes."""
-
-    base = f"idx_{table}_{column}"
-
-    if len(base.encode("utf-8")) <= 63:
-        return base
-
-    suffix = (
-        "_"
-        + hashlib.sha256(
-            base.encode("utf-8")
-        ).hexdigest()[:10]
-    )
-    byte_budget = 63 - len(
-        suffix.encode("utf-8")
-    )
-    prefix_bytes = base.encode("utf-8")[
-        :byte_budget
-    ]
-
-    while True:
-        try:
-            prefix = prefix_bytes.decode("utf-8")
-            break
-        except UnicodeDecodeError:
-            prefix_bytes = prefix_bytes[:-1]
-
-    return prefix + suffix
 
 
 def build_create_index_proposal(
