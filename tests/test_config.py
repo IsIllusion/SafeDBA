@@ -20,6 +20,23 @@ IMPORT_CONFIG = (
 
 
 class ConfigSafetyTests(unittest.TestCase):
+    def test_knowledge_requires_explicit_valid_deployment_scope_and_version(self):
+        for changes in ({"SAFEDBA_KNOWLEDGE_SCOPE": ""},
+                        {"SAFEDBA_KNOWLEDGE_POSTGRES_MAJOR": "0"},
+                        {"SAFEDBA_KNOWLEDGE_SCOPE": "*"}):
+            result = self.run_import({"SAFEDBA_KNOWLEDGE_ENABLED": "true",
+                                      "SAFEDBA_KNOWLEDGE_SCOPE": "team-a",
+                                      "SAFEDBA_KNOWLEDGE_POSTGRES_MAJOR": "18", **changes})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Invalid knowledge", result.stderr)
+
+    def test_knowledge_configuration_does_not_read_bundle_at_import(self):
+        result = self.run_import({"SAFEDBA_KNOWLEDGE_ENABLED": "true",
+                                  "SAFEDBA_KNOWLEDGE_SCOPE": "team-a",
+                                  "SAFEDBA_KNOWLEDGE_POSTGRES_MAJOR": "18",
+                                  "SAFEDBA_KNOWLEDGE_PATH": "missing-review-bundle.json"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_explicit_skip_dotenv_does_not_read_the_local_file(self):
         environment = os.environ.copy()
         environment.update({

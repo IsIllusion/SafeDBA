@@ -71,6 +71,7 @@ from agent_memory import SQLiteAgentMemory
 from telemetry import get_telemetry_manager
 from agent_context import AgentRunContext
 from agent_dependencies import AgentDependencies
+from agent_knowledge import configure_knowledge, KNOWLEDGE_INSTRUCTIONS
 from agent_runtime import DiagnosticAgent
 from agent_prompts import AGENT_INSTRUCTIONS
 from agent_review import review_execution_result as _review_execution_result
@@ -120,10 +121,13 @@ def call_tool(name: str, arguments: dict):
 
 
 def _dependencies():
+    knowledge, registry, dispatch = configure_knowledge(
+        runtime_config, TOOL_REGISTRY, call_tool, require_tool
+    )
     return AgentDependencies(
         settings=runtime_config,
-        registry=TOOL_REGISTRY,
-        dispatch_tool=call_tool,
+        registry=registry,
+        dispatch_tool=dispatch,
         get_provider=get_llm_provider,
         memory_store_factory=SQLiteAgentMemory,
         experience_store_factory=SQLiteExperienceStore,
@@ -135,7 +139,12 @@ def _dependencies():
         filter_tools=filter_tools,
         clock=time,
         evidence_ttl_seconds=AGENT_RUNTIME_EVIDENCE_TTL_SECONDS,
-        instructions=AGENT_INSTRUCTIONS,
+        instructions=(
+            AGENT_INSTRUCTIONS + "\n\n" + KNOWLEDGE_INSTRUCTIONS
+            if knowledge is not None
+            else AGENT_INSTRUCTIONS
+        ),
+        knowledge=knowledge,
     )
 
 

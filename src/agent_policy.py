@@ -135,6 +135,11 @@ def is_explicit_proposal_request(
     )
 
 
+def normalize_citation_placeholders(answer: str) -> str:
+    """Render exact syntax examples as plain text, not purported source links."""
+    return re.sub(r"\[(kb|ev)-(?:\.\.\.|…)\]", r"\1-…", answer, flags=re.IGNORECASE)
+
+
 def validate_answer_evidence(
     answer: str,
     records: list[EvidenceRecord] | None = None,
@@ -151,9 +156,6 @@ def validate_answer_evidence(
             if record.status == "success"
         }
 
-    if not successful_refs:
-        return []
-
     cited_refs = {
         match.lower()
         for match in re.findall(
@@ -164,7 +166,7 @@ def validate_answer_evidence(
     }
     errors: list[str] = []
 
-    if not cited_refs:
+    if successful_refs and not cited_refs:
         errors.append(
             "The final answer must cite at least one successful "
             "evidence reference in [ev-0001] form."

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "id": "incident-coordination",
+      "title": "Incident coordination example",
+      "source": "urn:safedba:example:incident-coordination",
+      "revision": "example-1",
+      "reviewed_by": "replace-with-actual-reviewer",
+      "reviewed_at": "2026-09-12T00:00:00Z",
+      "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["my-team"],
+      "environments": ["development"],
+      "postgres_majors": [18],
+      "keywords": ["lock incident", "锁等待", "业务负责人"],
+      "text": "Template content, not an organization policy: identify the incident owner and gather current database observations. Historical documentation is not approval to modify the database. Replace this text with an approved runbook and update its scope, provenance and review dates before publication."
+    }
+  ]
+}

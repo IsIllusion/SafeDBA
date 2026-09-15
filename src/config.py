@@ -458,6 +458,13 @@ EXPERIENCE_CAPTURE_ENABLED = env_bool(
     True,
 )
 
+# Optional reference retrieval; no document is loaded when disabled.
+# Scope/version come from operator configuration, never user/model text.
+KNOWLEDGE_ENABLED = env_bool("SAFEDBA_KNOWLEDGE_ENABLED", False)
+KNOWLEDGE_PATH = PROJECT_ROOT / Path(os.getenv("SAFEDBA_KNOWLEDGE_PATH", "knowledge/published.json"))
+KNOWLEDGE_SCOPE = os.getenv("SAFEDBA_KNOWLEDGE_SCOPE", "").strip()
+KNOWLEDGE_POSTGRES_MAJOR = env_int("SAFEDBA_KNOWLEDGE_POSTGRES_MAJOR", 0)
+
 # ----------------------------------------
 # SafeDBA policy
 # ----------------------------------------
@@ -834,3 +841,6 @@ def validate_settings() -> None:
 
 
 validate_settings()
+if KNOWLEDGE_ENABLED:
+    from knowledge_base import KnowledgeScope
+    KnowledgeScope(KNOWLEDGE_SCOPE, SAFEDBA_ENV, KNOWLEDGE_POSTGRES_MAJOR)

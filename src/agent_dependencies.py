@@ -24,3 +24,4 @@ class AgentDependencies:
     clock: Any
     evidence_ttl_seconds: float
     instructions: str
+    knowledge: Any = None

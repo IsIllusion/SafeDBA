@@ -1,8 +1,9 @@
 """Diagnostic model and evidence-citation nodes; no persistence or DB connections."""
 
 import json
+from agent_knowledge import knowledge_observation_requirements
 from agent_graph import run_diagnostic_graph
-from agent_policy import validate_answer_evidence
+from agent_policy import normalize_citation_placeholders, validate_answer_evidence
 from agent_tool_execution import AgentToolExecutor
 from langchain_bridge import langchain_tools
 from model_metadata import (
@@ -58,6 +59,9 @@ class DiagnosticAgent:
         self.context.framework_tools = langchain_tools(
             self.context.dependencies.registry, self.context.dependencies.dispatch_tool
         )
+        terminal = self.tool_executor.prefetch_knowledge()
+        if terminal is not None:
+            return terminal
         return run_diagnostic_graph(
             model_step=self.model_step,
             tools_step=self.tool_executor.run_turn,
@@ -266,6 +270,39 @@ class DiagnosticAgent:
                 stop_reason="model_" + self.context.finish_reason,
                 answer=content,
             )
+        # Ellipsis placeholders describe citation syntax; never treat them as
+        # delivered IDs. Remove brackets only, preserving the answer's meaning.
+        # Actual IDs (including unknown/malformed IDs) are NOT normalized away.
+        content = normalize_citation_placeholders(content)
+        if self.context.dependencies.knowledge is not None:
+            needed = knowledge_observation_requirements(self.context.user_message)
+            attempted = {
+                item.get("tool")
+                for item in self.context.tool_trace
+                if item.get("status") in {"success", "error"}
+            }
+            missing = sorted(needed - attempted)
+            if missing:
+                if iteration + 1 >= self.context.max_iterations:
+                    self.context.errors.append(
+                        {"type": "RequiredObservationMissing", "tools": missing}
+                    )
+                    return self.context.finish(
+                        status="stopped",
+                        stop_reason="required_observation_missing",
+                        answer=content,
+                    )
+                self.context.messages.append(
+                    {
+                        "role": "user",
+                        "content": "The mixed request is incomplete: reference knowledge does not satisfy the requested current database observations. "
+                        "Use these read-only tools before answering: "
+                        + ", ".join(missing)
+                        + ". Respect runtime policy. No additional user approval is needed for observations already permitted by that policy. "
+                        "If an observation fails, disclose the failure rather than invent a result. Do not execute mutations.",
+                    }
+                )
+                return None
         required_refs = {
             ref
             for proposal in self.context.proposals
@@ -275,6 +312,17 @@ class DiagnosticAgent:
         citation_errors = validate_answer_evidence(
             content, self.context.ledger.records, required_refs=required_refs
         )
+        if self.context.dependencies.knowledge is not None:
+            citation_errors.extend(
+                self.context.dependencies.knowledge.validate_answer(
+                    content,
+                    {
+                        record.ref
+                        for record in self.context.ledger.records
+                        if record.status == "success"
+                    },
+                )
+            )
         if citation_errors:
             if iteration + 1 >= self.context.max_iterations:
                 self.context.errors.append(

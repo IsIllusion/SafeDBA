@@ -12,7 +12,7 @@ responsible for evidence validation, approvals, execution, and recovery.
 | Public API and integration composition | `src/agent.py` and `src/agent_dependencies.py` |
 | Diagnostic nodes and run lifecycle | `src/agent_runtime.py`, `src/agent_tool_execution.py`, and `src/agent_context.py` |
 | Model interoperability | `src/langchain_bridge.py`: `BaseChatModel`, native `AIMessage` history, and a compatible-provider adapter |
-| Tool invocation | LangChain `StructuredTool` wrappers built from the existing immutable registry schemas |
+| Tool invocation | LangChain `StructuredTool` wrappers built from the existing immutable registry schemas; optional run-local knowledge tool |
 | Evidence and proposal authorization | Existing `EvidenceLedger`, mode filters, freshness checks, and schema validation |
 | Memory and incident durability | Existing SQLite stores, unchanged schemas and approval semantics |
 | Database mutations | Existing controlled executors and optional independent lock worker |
@@ -141,7 +141,12 @@ ambient framework configuration from exporting conversation/SQL payloads or
 reusing cached diagnoses. Custom model implementations still own their internal
 network behavior and must be trusted by the deploying application.
 
-## Verification — 2026-09-08
+Knowledge retrieval is an optional additional tool, not a replacement graph or
+evidence source. Disabled deployments retain the original tool/prompt/result
+contracts. Enabled runs keep document citations separate from database evidence;
+see [controlled retrieval](KNOWLEDGE_RETRIEVAL.md).
+
+## Migration verification — 2026-09-08 (historical baseline)
 
 The automated suite discovers **384 tests**: **365 portable tests** and **19
 PostgreSQL integration tests**. Portable coverage includes:

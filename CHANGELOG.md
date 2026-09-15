@@ -3,6 +3,99 @@
 This file records implemented project changes, not production certifications
 or claims that all configured CI platforms have already been exercised.
 
+## 2026-09-15 — Public project documentation
+
+- Reorganized the README around capabilities, architecture, installation,
+  usage, knowledge retrieval, deployment and development workflows.
+- Moved detailed execution policies, audit handling and runtime configuration
+  into `docs/OPERATIONS.md`, preserving operational requirements.
+- Kept evaluation methodology and historical results in the dedicated reports;
+  the project overview does not present regression scores as production accuracy.
+
+## 2026-09-15 — PostgreSQL observation module separation
+
+- Extracted nine observations into catalog, operational and session/lock
+  modules, composed through immutable per-call read-only dependencies. These
+  modules have no deployment config, driver or executor imports.
+- Retained all 26 existing `db_tools` function signatures, exact SQL and result
+  contracts, redaction, lock identity/digest handling and connection policy.
+  Execution, approval and durable workflow implementations were not changed.
+- Reduced `db_tools.py` from 2,364 to 1,127 lines. The facade and four new modules
+  total 2,277 lines, a net reduction of 87; this is a maintainability change, not
+  a database-speed or model-accuracy claim.
+- Added 18 alignment tests with pre-edit function hashes anchored to `7fbc51b`,
+  exact transcript/result/error replay, unchanged security/mutation bodies,
+  import isolation, policy refusal and independent observation contexts.
+- Verified 449 portable tests on Python 3.10 and 3.12, dependency consistency in
+  both environments, 21 PostgreSQL 18.4 tests in three consecutive runs, and the
+  13-case retrieval fixture. See `docs/CODE_STRUCTURE.md` for evidence and limits.
+- No paid model calls, business database access, dependency or configuration
+  changes. Earlier RAG scores remain historical, not newly measured here.
+
+## 2026-09-15 — RAG reliability repairs
+
+- Added budgeted, explicitly attributed initial knowledge lookup for internal
+  reference questions, using the existing scoped LangChain tool. Pure diagnosis
+  and explicit lookup opt-outs do not trigger it.
+- Added bounded completion checks for mixed knowledge/current-observation
+  requests; reading a runbook does not replace requested database observations.
+- Normalized exact citation-format placeholders without accepting fabricated
+  source IDs. Empty evidence ledgers now reject invented numeric citations,
+  including with RAG disabled; this is an intentional validation tightening.
+- Added runtime applicability timestamps and a narrow check for contradictory
+  present-tense expiry claims. This is not general semantic entailment checking.
+- Added 21 portable tests and a real three-lock prefetch/approval integration
+  case. Retried only transient Windows sharing violations during owned test
+  workspace cleanup, preserving other cleanup failures.
+- Verified 431 portable tests on Python 3.10 and 3.12, 21 PostgreSQL 18.4 tests
+  in three consecutive final runs, and all 13 retrieval fixture cases.
+- Final paired regression: RAG disabled 10/24, enabled 24/24; enabled average
+  reported tokens fell from the earlier 17,433.1 to 13,101.3 per session.
+  Retained intermediate failures and an automatically unscored semantic error
+  in `docs/RAG_REPAIR_VERIFICATION.md`; the reused cases are not a holdout.
+- No new dependency, database schema or approval authority; no deployed
+  knowledge or `.env` changes, and no automatic training.
+
+## 2026-09-15 — Paired real-model RAG evaluation
+
+- Added an opt-in isolated evaluator using the existing diagnostic graph and
+  reference integration, with synthetic observations and no database adapters.
+- Added 12 fixed bilingual tasks, alternating off/on order, two bounded repeats,
+  independent fact/citation grading, request accounting and source fingerprints.
+- Ran 48 Agent sessions against the configured DeepSeek model: strict passes
+  were 8/24 without RAG and 17/24 with RAG; internal-knowledge passes were 0/12
+  and 9/12. Refusal cases regressed from 4/6 to 3/6. Retained all failures.
+- Recorded missed retrieval, placeholder-citation repair loops, irrelevant
+  retrieval noise, and semantic limitations in `docs/RAG_AB_EVALUATION.md`.
+- Verified 410 portable tests on Python 3.10 and 3.12 (11 new evaluator tests).
+  The 20 opt-in PostgreSQL tests were skipped, not rerun, in this evaluation.
+- No changes to production Agent behavior, deployed knowledge or `.env`.
+
+## 2026-09-12 — Controlled reference knowledge retrieval
+
+### Added
+
+- Optional, default-off `search_knowledge` integration using the existing
+  LangChain/LangGraph path and a run-local registry; no new dependencies.
+- Operator-reviewed local JSON bundles with source/revision metadata, expiry,
+  deployment scope, environment and PostgreSQL-major filtering before ranking.
+- Bounded English/CJK lexical BM25 search, independent `kb-...` citations,
+  delivery/expiry/revocation checks and safe unavailable/empty-result behavior.
+- Operator-only validation and exclusive-file publication, with private knowledge
+  files ignored by Git and common credential-pattern checks.
+- A replaceable retriever interface, documented setup, and a 13-case synthetic
+  retrieval evaluator with an explicit no-knowledge baseline.
+
+### Verified locally
+
+- 399 portable tests passed on Windows Python 3.10.20 and 3.12.14, including
+  34 additional retrieval, integration-adapter, evaluation and configuration checks.
+- 20 PostgreSQL 18.4 tests passed in three runs, including an additional
+  knowledge-enabled three-blocker case retaining one workflow approval.
+- Existing frozen runtime/prompt/tool alignment tests still pass when knowledge
+  is disabled. No database schema, approval gate or independent-worker authority
+  changes; no paid model calls or automatic training.
+
 ## 2026-09-08 — Modular refactor and compatibility consolidation
 
 ### Changed

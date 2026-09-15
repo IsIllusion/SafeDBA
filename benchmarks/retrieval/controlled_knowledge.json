@@ -1,0 +1,69 @@
+{
+  "scope": {"scope_id": "evaluation", "environment": "benchmark", "postgres_major": 18},
+  "as_of": "2026-09-12T00:00:00Z",
+  "documents": [
+    {
+      "id": "locks", "title": "Lock response runbook", "source": "urn:safedba:synthetic:locks",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-09-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["evaluation"], "environments": ["benchmark"], "postgres_majors": [18],
+      "keywords": ["blocking transaction", "锁等待", "锁阻塞"],
+      "text": "Synthetic runbook: inspect fresh lock observations and contact the transaction owner. A historical runbook never authorizes terminating a backend. 锁等待需要重新观察当前阻塞关系并联系事务负责人。"
+    },
+    {
+      "id": "capacity", "title": "Connection capacity runbook", "source": "urn:safedba:synthetic:capacity",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-09-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["evaluation"], "environments": ["benchmark"], "postgres_majors": [18],
+      "keywords": ["connection pool", "连接池打满", "连接耗尽"],
+      "text": "Synthetic runbook: inspect connection capacity and application pool configuration. 连接池耗尽应检查连接数量以及应用连接池配置。"
+    },
+    {
+      "id": "replication", "title": "Replication lag runbook", "source": "urn:safedba:synthetic:replication",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-09-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["evaluation"], "environments": ["benchmark"], "postgres_majors": [18],
+      "keywords": ["standby delay", "复制延迟"],
+      "text": "Synthetic runbook: gather current replication observations before explaining standby lag. 复制延迟应先收集当前复制状态，不能用历史记录替代实时观测。"
+    },
+    {
+      "id": "business", "title": "Settlement owner policy context", "source": "urn:safedba:synthetic:business",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-09-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["evaluation"], "environments": ["benchmark"], "postgres_majors": [18],
+      "keywords": ["settlement batch", "结算任务"],
+      "text": "Synthetic business context: contact the settlement service owner for incident coordination. Mandatory restrictions must also be enforced by deterministic policy. 结算任务的处理需联系业务负责人。"
+    },
+    {
+      "id": "other-tenant", "title": "confidentialscope", "source": "urn:safedba:synthetic:other-tenant",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-09-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["other-team"], "environments": ["benchmark"], "postgres_majors": [18], "text": "confidentialscope unique private reference."
+    },
+    {
+      "id": "expired", "title": "retiredprocedure", "source": "urn:safedba:synthetic:expired",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-08-01T00:00:00Z", "expires_at": "2026-09-01T00:00:00Z",
+      "scope_ids": ["evaluation"], "environments": ["benchmark"], "postgres_majors": [18], "text": "retiredprocedure unique expired reference."
+    },
+    {
+      "id": "wrong-version", "title": "legacyversiononly", "source": "urn:safedba:synthetic:version",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-09-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["evaluation"], "environments": ["benchmark"], "postgres_majors": [16], "text": "legacyversiononly unique older version reference."
+    },
+    {
+      "id": "wrong-environment", "title": "productionexclusive", "source": "urn:safedba:synthetic:environment",
+      "revision": "fixture-1", "reviewed_by": "synthetic-test-fixture", "reviewed_at": "2026-09-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+      "scope_ids": ["evaluation"], "environments": ["production"], "postgres_majors": [18], "text": "productionexclusive unique production reference."
+    }
+  ],
+  "cases": [
+    {"id": "en-locks", "query": "blocking transaction", "relevant_document_ids": ["locks"]},
+    {"id": "zh-locks", "query": "锁等待", "relevant_document_ids": ["locks"]},
+    {"id": "en-capacity", "query": "connection pool", "relevant_document_ids": ["capacity"]},
+    {"id": "zh-capacity", "query": "连接池打满", "relevant_document_ids": ["capacity"]},
+    {"id": "en-replication", "query": "standby delay", "relevant_document_ids": ["replication"]},
+    {"id": "zh-replication", "query": "复制延迟", "relevant_document_ids": ["replication"]},
+    {"id": "en-business", "query": "settlement batch", "relevant_document_ids": ["business"]},
+    {"id": "zh-business", "query": "结算任务", "relevant_document_ids": ["business"]},
+    {"id": "no-match", "query": "unrelatedxyz", "relevant_document_ids": []},
+    {"id": "scope-denied", "query": "confidentialscope", "relevant_document_ids": []},
+    {"id": "expired-denied", "query": "retiredprocedure", "relevant_document_ids": []},
+    {"id": "version-denied", "query": "legacyversiononly", "relevant_document_ids": []},
+    {"id": "environment-denied", "query": "productionexclusive", "relevant_document_ids": []}
+  ]
+}

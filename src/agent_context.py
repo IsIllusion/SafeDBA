@@ -423,9 +423,7 @@ class AgentRunContext:
             "usage": {
                 "llm_turns": self.llm_turns,
                 "tool_calls_attempted": self.attempted_tool_calls,
-                "tool_calls_succeeded": sum(
-                    (1 for record in self.ledger.records if record.status == "success")
-                ),
+                "tool_calls_succeeded": self._successful_tool_calls(),
                 "elapsed_ms": round(elapsed_ms, 3),
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
@@ -442,6 +440,8 @@ class AgentRunContext:
             },
             "experience_recorded": False,
         }
+        if self.dependencies.knowledge is not None:
+            result["knowledge"] = self.dependencies.knowledge.summary()
         self._capture_experience(
             result,
             status=status,
@@ -454,14 +454,18 @@ class AgentRunContext:
             stop_reason=stop_reason,
             llm_turns=self.llm_turns,
             tool_calls_attempted=self.attempted_tool_calls,
-            tool_calls_succeeded=sum(
-                (1 for record in self.ledger.records if record.status == "success")
-            ),
+            tool_calls_succeeded=self._successful_tool_calls(),
             total_tokens=self.total_tokens,
             error_count=len(self.errors),
         )
         result["trace_id"] = self.telemetry_run.trace_id
         return result
+
+    def _successful_tool_calls(self):
+        knowledge = self.dependencies.knowledge
+        return sum(record.status == "success" for record in self.ledger.records) + (
+            knowledge.successful_calls if knowledge is not None else 0
+        )
 
     def graph_snapshot(self):
         return {

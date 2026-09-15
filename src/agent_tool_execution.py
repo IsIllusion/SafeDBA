@@ -1,6 +1,12 @@
 """Serial tool execution, evidence authorization, and bounded tool replies."""
 
 import json
+from types import SimpleNamespace
+from agent_knowledge import (
+    KNOWLEDGE_TOOL,
+    initial_knowledge_query,
+    knowledge_observation_requirements,
+)
 from agent_policy import (
     PROPOSAL_TOOLS,
     serialize_tool_output,
@@ -15,6 +21,60 @@ class AgentToolExecutor:
 
     def __init__(self, context):
         self.context = context
+
+    def prefetch_knowledge(self):
+        """One explicitly attributed, budgeted read before the first model turn."""
+        session = self.context.dependencies.knowledge
+        if session is None or session.calls:
+            return None
+        query = initial_knowledge_query(self.context.user_message)
+        if query is None:
+            return None
+        if self.context.attempted_tool_calls >= self.context.max_total_tool_calls:
+            return self.context.finish(
+                status="stopped", stop_reason="total_tool_budget_exceeded"
+            )
+        call_id = "runtime-knowledge-" + self.context.run_id
+        arguments = json.dumps({"query": query}, ensure_ascii=False)
+        needed = knowledge_observation_requirements(self.context.user_message)
+        # This is a runtime-selected operation, NOT a model-generated decision.
+        # Use the normal tool channel so reference text never becomes instructions.
+        self.context.messages.append(
+            {
+                "role": "assistant",
+                "content": "The runtime selected an initial read-only knowledge lookup for this request."
+                + (
+                    " This does not complete the current-database part: continue with the requested observations using "
+                    + ", ".join(sorted(needed))
+                    + ", subject to runtime policy, before answering."
+                    if needed
+                    else ""
+                ),
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": KNOWLEDGE_TOOL,
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            }
+        )
+        self.context.attempted_tool_calls += 1
+        terminal = self.invoke_one(
+            SimpleNamespace(
+                id=call_id,
+                function=SimpleNamespace(name=KNOWLEDGE_TOOL, arguments=arguments),
+            ),
+            len(self.context.ledger.records),
+        )
+        if terminal is not None:
+            return terminal
+        self.context.tool_trace[-1]["origin"] = "runtime_knowledge_prefetch"
+        self.context.checkpoint_memory_run("KNOWLEDGE_PREFETCH_COMPLETED")
+        return None
 
     def run_turn(self, iteration):
         if len(self.context.tool_calls) > self.context.max_tool_calls_per_turn:
@@ -87,6 +147,12 @@ class AgentToolExecutor:
             self._invalid_arguments(
                 call_id, tool_name, arguments, {"messages": validation_errors}
             )
+            return
+        if (
+            tool_name == KNOWLEDGE_TOOL
+            and self.context.dependencies.knowledge is not None
+        ):
+            self._invoke_knowledge(call_id, arguments)
             return
         if self.context.ledger.is_duplicate(tool_name, arguments):
             result = {
@@ -214,6 +280,51 @@ class AgentToolExecutor:
             )
         self.context.messages.append(
             {"role": "tool", "tool_call_id": call_id, "content": tool_output}
+        )
+
+    def _invoke_knowledge(self, call_id, arguments):
+        # Reference text must NEVER be registered as successful DB evidence,
+        # including on error, duplicate, budget, or empty-result paths.
+        session = self.context.dependencies.knowledge
+        started = self.context.dependencies.clock.monotonic()
+        status = "success"
+        try:
+            with self.context.telemetry_run.span("safedba.knowledge.search"):
+                result = self.context.framework_tools[KNOWLEDGE_TOOL].invoke(
+                    arguments, config={"callbacks": []}
+                )
+        except Exception:
+            status = "error"
+            result = {
+                "kind": "reference_knowledge",
+                "status": "unavailable",
+                "matches": [],
+            }
+            self.context.errors.append(
+                {
+                    "tool": KNOWLEDGE_TOOL,
+                    "type": "KnowledgeRetrievalError",
+                    "message": "Reference knowledge is unavailable; no database authority was granted.",
+                }
+            )
+        result, output = session.reply(
+            result, max_chars=self.context.max_tool_output_chars
+        )
+        self.context.tool_trace.append(
+            {
+                "tool_call_id": call_id,
+                "tool": KNOWLEDGE_TOOL,
+                "arguments": summarize_arguments(arguments),
+                "status": status,
+                "duration_ms": round(
+                    (self.context.dependencies.clock.monotonic() - started) * 1000, 3
+                ),
+                "knowledge_refs": [hit["ref"] for hit in result["matches"]],
+                "result": summarize_result(result),
+            }
+        )
+        self.context.messages.append(
+            {"role": "tool", "tool_call_id": call_id, "content": output}
         )
 
     def _record_rejection(self, call_id, tool_name, arguments, result, status):

@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "reference_commit": "7fbc51badaa1c3aae5f1f83091edc24a81a9262a",
+  "description": "Captured before observation extraction; AST retains SQL literals, signature, branches, ordering and serialization. Python-only empty type_params metadata is excluded. New modules are reversed only through the explicit dependency mapping in the alignment test.",
+  "extracted": {
+    "get_indexes": "db_catalog",
+    "get_table_columns": "db_catalog",
+    "get_column_info": "db_catalog",
+    "get_column_stats": "db_catalog",
+    "get_database_health": "db_operational",
+    "get_operational_snapshot": "db_operational",
+    "get_active_sessions": "db_sessions",
+    "get_transaction_sessions": "db_sessions",
+    "get_lock_graph_snapshot": "db_sessions"
+  },
+  "functions": {
+    "ensure_read_only_query": {
+      "ast_sha256": "852a2f736d581b140d3730fe09f3002424524ef5befa359ae274bc1466a5ed35",
+      "signature_sha256": "d79ff2acf6193699dcbd19c0ce4ace8d7f3657bf62a344c16379f749f37ad490",
+      "lineno": 35,
+      "end_lineno": 41
+    },
+    "readonly_connection": {
+      "ast_sha256": "5b05a52873c450d144c571a02093af78244b76f15ae4ddfdbc216740b3722a54",
+      "signature_sha256": "28f5d1d3a3a1522126432009de8a5883de21f2815e15374b3b852b6a55af40bd",
+      "lineno": 45,
+      "end_lineno": 76
+    },
+    "executor_connection": {
+      "ast_sha256": "f7f757fa39e08f60154bcef395b3fcf73f9d766489fa6066036a229f80d124d8",
+      "signature_sha256": "28f5d1d3a3a1522126432009de8a5883de21f2815e15374b3b852b6a55af40bd",
+      "lineno": 80,
+      "end_lineno": 106
+    },
+    "terminator_connection": {
+      "ast_sha256": "88e66400f89dfd460e0673ce26470c44a665bd0e9bf44518c7d4235dd615b5df",
+      "signature_sha256": "28f5d1d3a3a1522126432009de8a5883de21f2815e15374b3b852b6a55af40bd",
+      "lineno": 110,
+      "end_lineno": 139
+    },
+    "_inspect_runtime_identity": {
+      "ast_sha256": "85ed6281c4343a69678223d5c2ab213b2bcbd56a7584fbc8f3cb048f5b76acfd",
+      "signature_sha256": "a0827000c7a96071af47c2c203804aae799966474c0349b035b73df0b198a230",
+      "lineno": 142,
+      "end_lineno": 227
+    },
+    "verify_runtime_security": {
+      "ast_sha256": "c9fc5315c82e881170ad7f5334b1c2772e1e19835f94346bcfa62979d200bb04",
+      "signature_sha256": "a15b3565eb2abc52ffcdf0986405040088a32584830f38feaaabe393f43ce13f",
+      "lineno": 230,
+      "end_lineno": 337
+    },
+    "truncate_observed_query": {
+      "ast_sha256": "adabe9a23ef55968f5c29e9a03042ccf9a5cd9face139945fd96632ee7586c82",
+      "signature_sha256": "e89195ad26d89bd6829e93271dbd37a85fd17c1017b0d1d16e486b3f4949f843",
+      "lineno": 340,
+      "end_lineno": 361
+    },
+    "_run_explain": {
+      "ast_sha256": "645bdb03cbb9d630e0ee3ccf9731dd35d2566a8ee1f10182e52f5b157f81f2f9",
+      "signature_sha256": "92855db7578c27478005d0352d0ea3a1b22ac06dad231176723642c5a2addfd6",
+      "lineno": 364,
+      "end_lineno": 400
+    },
+    "get_estimated_query_plan": {
+      "ast_sha256": "ed2cd2c12d79af0d3bd5bcb89c2a8155d2f8f5344d65824b0cae1f61a7b8fa65",
+      "signature_sha256": "9a926cd46d3ce370c83c8ff62a3cdee53f7efedf900c48f094f5851cc8cc0afd",
+      "lineno": 403,
+      "end_lineno": 411
+    },
+    "get_query_plan": {
+      "ast_sha256": "c6b88d393407a4ce34bc08d10a18624b6ffd47875d6f8e769248994f56124a91",
+      "signature_sha256": "9a926cd46d3ce370c83c8ff62a3cdee53f7efedf900c48f094f5851cc8cc0afd",
+      "lineno": 414,
+      "end_lineno": 450
+    },
+    "get_indexes": {
+      "ast_sha256": "0c9abee9cf80491b897c3fb806e51ace86a190f15e884eb42daf3cc1c204937e",
+      "signature_sha256": "95cd83a89fbd8776a4e329b63e73ce30d4f358ad7dfd92ad0cb355d6fc019d62",
+      "lineno": 453,
+      "end_lineno": 479
+    },
+    "get_table_columns": {
+      "ast_sha256": "b7717c20a6a741348c810663ac0c172fe4591e020cc3a454496059c84c787fc3",
+      "signature_sha256": "f95a657cb00f84acdd43d098b6acfb780fc24a9b1781f956227449e21b363819",
+      "lineno": 482,
+      "end_lineno": 506
+    },
+    "get_column_info": {
+      "ast_sha256": "6a2831dde1cd85723ab8c9ce011a9dcbbc24c7aafb35394d709153393c5ef0fe",
+      "signature_sha256": "5e881899e391fcb43187898e0e753d6a1243011afb5c3d4589b4dc146aea62b5",
+      "lineno": 508,
+      "end_lineno": 547
+    },
+    "get_column_stats": {
+      "ast_sha256": "25c1f57860cb6d5eaeba9efb9718045b915e0a9f4f63006d4428a8199e9f5aff",
+      "signature_sha256": "5e881899e391fcb43187898e0e753d6a1243011afb5c3d4589b4dc146aea62b5",
+      "lineno": 549,
+      "end_lineno": 661
+    },
+    "get_database_health": {
+      "ast_sha256": "316275a1e6088d9ad94285bee9927ce4a73b74c84b5b6b9600882736453e3fcd",
+      "signature_sha256": "a15b3565eb2abc52ffcdf0986405040088a32584830f38feaaabe393f43ce13f",
+      "lineno": 663,
+      "end_lineno": 837
+    },
+    "get_operational_snapshot": {
+      "ast_sha256": "33099f94ad431df9eea3b4de668e55decbd1a4ec637aadc82199edcb4fea8af1",
+      "signature_sha256": "a15b3565eb2abc52ffcdf0986405040088a32584830f38feaaabe393f43ce13f",
+      "lineno": 839,
+      "end_lineno": 1198
+    },
+    "get_active_sessions": {
+      "ast_sha256": "057068a8e7843b2ab56e67db143cb3ecf104e9b91e2841b1454720e4e4fa5729",
+      "signature_sha256": "8f6c4c158d1dd7aaac3f8fa97f02b22dca61eba43dd5fbbd1ff3ec56ce05ef44",
+      "lineno": 1201,
+      "end_lineno": 1319
+    },
+    "get_transaction_sessions": {
+      "ast_sha256": "6f2ffdb42754ac4572d5b3d9cb2a2867ff69abd8ebc19236598270a1b5459a03",
+      "signature_sha256": "8f6c4c158d1dd7aaac3f8fa97f02b22dca61eba43dd5fbbd1ff3ec56ce05ef44",
+      "lineno": 1321,
+      "end_lineno": 1453
+    },
+    "get_lock_graph_snapshot": {
+      "ast_sha256": "b1c74c8ccac5f2de6769b946367ae55ceba4ebb78122f92ef24a42ad715571e8",
+      "signature_sha256": "a15b3565eb2abc52ffcdf0986405040088a32584830f38feaaabe393f43ce13f",
+      "lineno": 1455,
+      "end_lineno": 1779
+    },
+    "get_lock_waits": {
+      "ast_sha256": "33f0be9d68cfbfb2f5e5c626ee56b36b67895760f2ba20798f251ba59c596ace",
+      "signature_sha256": "8f6c4c158d1dd7aaac3f8fa97f02b22dca61eba43dd5fbbd1ff3ec56ce05ef44",
+      "lineno": 1782,
+      "end_lineno": 1784
+    },
+    "terminate_blocking_backend": {
+      "ast_sha256": "b4578b490874fc2bed925e39059a9c5fb082ae78121c3988546b6910e1508979",
+      "signature_sha256": "d3c0b9ad4381cf4ac81a75ec71286f92e7dff33122ba8efa8272b0fe507b6d94",
+      "lineno": 1787,
+      "end_lineno": 2069
+    },
+    "create_index": {
+      "ast_sha256": "a1f09dfcc0f50b59338f5bae4ef2478e0250336eb4aa0d4fefe242b4139012ba",
+      "signature_sha256": "d8b0b3650fc02f1dae81cbcaecd840f06ddeb8b64b491690d869df5377a4778d",
+      "lineno": 2072,
+      "end_lineno": 2125
+    },
+    "analyze_table": {
+      "ast_sha256": "dbf0e8c77c942acf1b4742b749b88463662709f919e022550dfe74f40b43adbc",
+      "signature_sha256": "091beaae42d1a7157efb3f022a4f112d8614bcc340b2b02966958ef141edccb9",
+      "lineno": 2129,
+      "end_lineno": 2174
+    },
+    "drop_index": {
+      "ast_sha256": "fe8c125b6908b2362706acd11506a8695b21b362313856c970502b754ea3e48f",
+      "signature_sha256": "640826435a46c6eb54ce62306a0a2d2032c8e32d0dc1377768292178ba4d345f",
+      "lineno": 2178,
+      "end_lineno": 2220
+    },
+    "compare_query_results": {
+      "ast_sha256": "600f2ede45fbba4871b810dd04be5bfccc95039713cc2b3b26d701fb3193f717",
+      "signature_sha256": "77da2b1e174368edeb960b12dffe25b98119d0f1ab7f8b1cdbdb6e41c87b20d8",
+      "lineno": 2222,
+      "end_lineno": 2331
+    },
+    "benchmark_query": {
+      "ast_sha256": "09edf51d574c16f25d9e0e0d25a039bf88c0c4057ebeaf3e5d4430b3ba5f6d38",
+      "signature_sha256": "a104424ce15c791445d15cf0ce1b4d94e438b937e4b8511994432ead0e2e1533",
+      "lineno": 2333,
+      "end_lineno": 2364
+    }
+  }
+}
